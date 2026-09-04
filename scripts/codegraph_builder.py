@@ -111,6 +111,7 @@ import time
 import math
 import heapq
 import shutil
+import hashlib
 import argparse
 import ast as ast_module
 from pathlib import Path
@@ -1823,6 +1824,12 @@ class GraphBuilder:
 
         entry = {
             "mtime": mtime,
+            # Content hash: the secondary cache key. `mtime` alone re-parses a file
+            # whenever its timestamp moves even if the bytes are identical -- routine
+            # after `git checkout`, `git stash pop`, `rsync`, or a `touch`. On an
+            # incremental build, a stale mtime with a matching `sha` is served from
+            # cache (and its stored mtime refreshed so the fast path hits next time).
+            "sha": hashlib.sha256(content.encode("utf-8", "ignore")).hexdigest(),
             "nodes": bucket_nodes,
             "edges": bucket_edges,
         }
@@ -2340,6 +2347,18 @@ class GraphBuilder:
         out_dir.mkdir(exist_ok=True)
         (out_dir / CACHE_FILE).write_text(json.dumps(self.file_cache), encoding="utf-8")
 
+    @staticmethod
+    def _content_sha(fp: Path):
+        """sha256 of a file's bytes, matching extract_file()'s `entry["sha"]` (which
+        hashes the utf-8/errors='ignore' round-trip of the same read). Only called on
+        the slow path -- when mtime already disagrees -- so reading the file again here
+        is strictly cheaper than the parse it may let us skip. None on any read error."""
+        try:
+            text = fp.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            return None
+        return hashlib.sha256(text.encode("utf-8", "ignore")).hexdigest()
+
     def build(self, incremental=False, force=False):
         """incremental=False: re-parse every discovered file (full rebuild).
         incremental=True: reuse cached extraction for files whose mtime hasn't
@@ -2376,7 +2395,7 @@ class GraphBuilder:
 
         disk_cache = prior_cache if incremental else {}
         current_rels = set()
-        reused, reparsed = 0, 0
+        reused, reparsed, reused_by_hash = 0, 0, 0
 
         log("[extract] parsing files...")
         new_cache = {}
@@ -2399,10 +2418,20 @@ class GraphBuilder:
                             and EXT_MAP.get(_ext) in CALLSITE_TS_LANGS
                             and _ts_key in TREE_SITTER_LANGS
                             and "callsites" not in cached)
-            if incremental and cached and not stale_schema and mtime is not None and abs(cached.get("mtime", -1) - mtime) < 1e-6:
-                new_cache[rel] = cached
-                reused += 1
-                continue
+            if incremental and cached and not stale_schema:
+                if mtime is not None and abs(cached.get("mtime", -1) - mtime) < 1e-6:
+                    new_cache[rel] = cached
+                    reused += 1
+                    continue
+                # mtime moved -- fall back to the content hash before re-parsing.
+                cached_sha = cached.get("sha")
+                if cached_sha and cached_sha == self._content_sha(fp):
+                    refreshed = dict(cached)
+                    refreshed["mtime"] = mtime  # so next run takes the cheap mtime path
+                    new_cache[rel] = refreshed
+                    reused += 1
+                    reused_by_hash += 1
+                    continue
 
             entry = self.extract_file(fp)
             if entry is not None:
@@ -2412,7 +2441,8 @@ class GraphBuilder:
         removed = len(disk_cache) - len(set(disk_cache) & current_rels)
         self.file_cache = new_cache
         if incremental:
-            log(f"   {reparsed} file(s) (re)parsed, {reused} served from cache, {removed} removed")
+            by_hash = f" ({reused_by_hash} by content hash, unchanged despite a new mtime)" if reused_by_hash else ""
+            log(f"   {reparsed} file(s) (re)parsed, {reused} served from cache{by_hash}, {removed} removed")
 
         log("[link] merging cache, resolving references, communities, metrics...")
         self._merge_cache_into_graph()

@@ -364,6 +364,15 @@ optional dependency actually being installed):
   body scan unchanged; a file whose tree-sitter parse fails falls back to it too. One
   incremental build re-parses already-cached JS/TS files once to pick up call sites;
   a full `/graph build` covers them all at once.
+- **Content hash as a secondary cache key.** `.file_cache.json` entries now carry a
+  `sha` (sha256 of the file's text). On an incremental build, a file whose `mtime`
+  moved but whose `sha` still matches the cache is served from cache instead of
+  re-parsed, and its stored `mtime` is refreshed so the next run takes the plain
+  fast path — this covers `git checkout`, `git stash pop`, `rsync`, `touch`, and
+  branch switches, all of which move timestamps without changing bytes. The hash is
+  only computed on the slow path (mtime already disagrees), so an unchanged tree
+  costs nothing extra. Old cache entries without a `sha` just re-parse once.
+
 - **tree-sitter is pinned to `>=0.23,<0.25`.** `tree-sitter` 0.26 segfaults (native
   access violation) partway through parsing a real TS tree with the current grammar
   wheels; 0.23.x is the last line this code was verified against. `pip install` lines
@@ -420,10 +429,13 @@ When the user asks anything about the codebase:
 If `.codegraph/graph.json`'s `generated_at` predates the newest source file's mtime:
 1. Run `python codegraph_builder.py --update <project_root>`.
 2. This is a genuine incremental build: the script keeps a per-file cache
-   (`.codegraph/.file_cache.json`) keyed on path + mtime and only re-parses files that
-   actually changed since the last run; everything else (cross-reference resolution,
-   communities, metrics) is still recomputed in memory from the merged result, which is
-   cheap and is what keeps repeated runs from ever duplicating nodes or edges.
+   (`.codegraph/.file_cache.json`) keyed on path + mtime, with a sha256 content hash as
+   a secondary key (a file whose mtime moved but whose bytes didn't — `git checkout`,
+   `stash pop`, `rsync`, `touch` — is served from cache, not re-parsed), and only
+   re-parses files that actually changed since the last run; everything else
+   (cross-reference resolution, communities, metrics) is still recomputed in memory
+   from the merged result, which is cheap and is what keeps repeated runs from ever
+   duplicating nodes or edges.
 3. Notify briefly: "Graph refreshed ({X} files re-parsed, {Y} served from cache)."
 
 ### Rule 4: Continuous Mode (Optional)

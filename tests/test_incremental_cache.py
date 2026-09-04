@@ -44,6 +44,27 @@ def test_update_reparses_only_changed_files(tmp_path, run_cli):
     assert "1 served from cache" in proc.stdout, proc.stdout
 
 
+def test_update_serves_from_cache_when_only_mtime_moved(tmp_path, run_cli):
+    """A stale mtime with identical content (the `git checkout` / `touch` case) must be
+    served from cache via the sha256 secondary key, not re-parsed."""
+    import os, time
+
+    write_files(tmp_path, {"src/a.py": "def a(): pass\n", "src/b.py": "def b(): pass\n"})
+    run_cli(tmp_path)
+
+    future = time.time() + 100
+    os.utime(tmp_path / "src" / "a.py", (future, future))  # bump mtime, keep bytes
+
+    proc = run_cli(tmp_path, "--update")
+    assert "by content hash" in proc.stdout, proc.stdout
+    assert "0 file(s) (re)parsed" in proc.stdout, proc.stdout
+
+    # and the stored mtime is refreshed, so the next run takes the plain fast path
+    proc2 = run_cli(tmp_path, "--update")
+    assert "by content hash" not in proc2.stdout, proc2.stdout
+    assert "0 file(s) (re)parsed" in proc2.stdout, proc2.stdout
+
+
 def test_update_drops_deleted_files_from_cache(tmp_path, run_cli, graph_json):
     write_files(tmp_path, {
         "src/a.py": "def a(): pass\n",
