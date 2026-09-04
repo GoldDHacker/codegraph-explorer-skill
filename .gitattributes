@@ -1,0 +1,3 @@
+# The skill loader parses SKILL.md's YAML frontmatter; keep it LF so a CRLF checkout
+# on Windows can't confuse the parser.
+SKILL.md text eol=lf
