@@ -46,6 +46,12 @@ Notes:
 - There is no `directory` node type in the current output, unlike some earlier drafts of
   this skill implied — communities are computed from directory paths as strings (see
   below), not as their own graph nodes.
+- `file` nodes carry `metadata.language` and `metadata.role` (`"test"` when the path
+  has a test directory segment — `tests/`, `__tests__/`, `spec/`, `e2e/`, ... — or a
+  test filename shape — `test_*.py`, `*_test.go`, `*.test.ts`, `*Test.java`,
+  `*_spec.rb`, ... — else `"prod"`). It's a path heuristic used by `--impact` to split
+  the blast radius into prod code vs "tests to re-run"; a plain helper module under
+  `tests/` counts as test code.
 - `metadata` fields vary by node type: `bases` for classes, `kind` for
   interface/type/struct/symbol/arrow-function nodes, `style`/`raw` for import nodes,
   `detected_by`/`whole_file`/`marker_line` for entrypoints (`whole_file`: true when the

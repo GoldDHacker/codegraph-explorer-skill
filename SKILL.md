@@ -364,6 +364,15 @@ optional dependency actually being installed):
   body scan unchanged; a file whose tree-sitter parse fails falls back to it too. One
   incremental build re-parses already-cached JS/TS files once to pick up call sites;
   a full `/graph build` covers them all at once.
+- **`--impact` is test-aware (#D).** Every `file` node is tagged
+  `metadata.role` — `"test"` when its path has a test directory segment
+  (`tests/`, `__tests__/`, `spec/`, ...) or a test filename shape (`test_*.py`,
+  `*_test.go`, `*.test.ts`, `*Test.java`, `*_spec.rb`, ...), else `"prod"`. `--impact`
+  uses it to separate the blast radius into prod code (the hop-by-hop list) and a
+  `tests_to_run` list — the test files whose code transitively exercises the symbol
+  being changed, i.e. exactly what to re-run. Purely a path heuristic; it does not
+  change extraction or `calls` resolution.
+
 - **Content hash as a secondary cache key.** `.file_cache.json` entries now carry a
   `sha` (sha256 of the file's text). On an incremental build, a file whose `mtime`
   moved but whose `sha` still matches the cache is served from cache instead of
@@ -517,6 +526,16 @@ change/break X, what else might break" — `--callers` answers "who calls X dire
 `--trace-entrypoints` answers "how do I reach X from the outside", `--impact` answers
 "how far does a change to X actually propagate". If nothing depends on the symbol, it
 says so explicitly rather than an empty list.
+
+The blast radius is split **prod vs test** (v5, #D): the detailed hop-by-hop list is
+prod code only, and a separate `tests_to_run` field / "test files to re-run" line names
+every test file holding a symbol in the closure — i.e. the tests that actually exercise
+what you're about to change. Test files are recognised by directory segment (`tests/`,
+`__tests__/`, `spec/`, `e2e/`, ...) or filename shape (`test_*.py`, `*_test.go`,
+`*.test.ts`, `*Test.java`, `*_spec.rb`, ...); the classification also lands on every
+`file` node as `metadata.role` (`"test"` / `"prod"`), so `--explain` on a file shows it
+too. This is a path heuristic, not a test-framework analysis — a helper module living
+under `tests/` counts as test code.
 
 ### `/graph query "<question>"`
 Free-form questions don't map to a single CLI flag — this is where Claude's own

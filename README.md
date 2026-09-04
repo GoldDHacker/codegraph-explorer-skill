@@ -40,6 +40,7 @@ Skill pour Claude Code, inspiré de **Graphify** et **Understand Anything**.
 | Entre v3.4 et v4.4, `graph.html` avait régressé en rechargeant D3 depuis `https://d3js.org` — page blanche à l'ouverture hors-ligne, alors que le `SKILL.md` continuait de le qualifier de « self-contained » | Renderer sans dépendance restauré (post-v4.4) : petite simulation de forces vélocité-Verlet faite main, SVG à la main, pan/zoom/glisser/recherche/légende en vanilla, aucun `<script src>`, aucun CDN. Récupère aussi le focus sur les voisins que la version D3 avait perdu. Vérifié avec `window.d3 === undefined` et zéro erreur console |
 | Les edges `calls` JS/TS venaient d'un scan `\bnom(` du texte du corps : `if (`/`while (`/`catch (` comptés comme des appels, `nom(` en commentaire aussi, méthodes privées ES `#m()` jamais vues, récepteur (`this`, `db`, …) ignoré | Résolution `calls` par AST tree-sitter (post-v4.4, JS/TS) : chaque `call_expression`/`new_expression` réel devient un call site `{name, recv, line}` attribué à la fonction englobante ; `this.m()` se résout vers une méthode de la classe de l'appelant (`resolved_by: "this_method"`, 0.97). Mesuré sur `sindresorhus/got` : +~30 edges de méthodes privées réels, ~115 appels passés d'un `same_file` vague à un `this_method` précis, ~9 faux positifs en commentaire supprimés. Les autres langages gardent le scan de corps inchangé |
 | Le cache incrémental était indexé sur `mtime` seul : `git checkout`, `git stash pop`, `rsync`, `touch` bougent l'horodatage sans toucher au contenu → tout le projet reparsé pour rien | Clé secondaire par hash de contenu (post-v4.4) : `.file_cache.json` stocke un `sha` sha256 ; un `mtime` périmé mais un `sha` identique → servi du cache, `mtime` rafraîchi pour la fois d'après. Le hash n'est calculé que sur le chemin lent (mtime déjà différent) — un arbre inchangé ne coûte rien de plus |
+| `--impact X` mélangeait code prod impacté et tests dans une seule liste — impossible de voir d'un coup d'œil « quels tests relancer » | `--impact` séparé prod / test (post-v4.4, #D) : chaque nœud `file` porte `metadata.role` (`"test"` si segment de dossier `tests/`/`spec/`/… ou nom `test_*.py`/`*_test.go`/`*.test.ts`/… , sinon `"prod"`) ; `--impact` sort la liste détaillée en prod seul + un champ `tests_to_run` listant les fichiers de test qui exercent transitivement le symbole modifié |
 
 Le détail complet des bugs trouvés et corrigés est dans `SKILL.md` (§ "What changed in v3" … "What changed after v4.4").
 
@@ -330,11 +331,14 @@ compris la limite documentée du symbole déplacé verrouillée comme régressio
 non-régressions sur des valeurs bénignes réalistes (extension de `TestRedact` dans
 `tests/test_unit_helpers.py`), et — post-v4.4 — le fait que `graph.html` reste sans
 dépendance externe (`tests/test_html_offline.py` : aucun `<script src>`, aucun CDN,
-aucun appel D3, verrouillé comme régression) et la résolution `calls` par AST JS/TS
+aucun appel D3, verrouillé comme régression), la résolution `calls` par AST JS/TS
 (`tests/test_calls_ast.py` : `if (`/`while (`/`catch (` jamais comptés comme appels,
 `this.m()` → méthode de la même classe, appel dans un callback crédité à la méthode
-englobante, appel nu préférant la fonction libre, `new X()` → classe, import résolu).
-Les tests qui dépendent de `tree-sitter`/`ladybug`/
+englobante, appel nu préférant la fonction libre, `new X()` → classe, import résolu),
+la clé de cache par hash de contenu (`tests/test_incremental_cache.py` : `mtime` bougé
++ contenu identique → servi du cache), et le `--impact` prod/test
+(`tests/test_impact_tests.py` : `metadata.role` sur les nœuds `file`, `tests_to_run`,
+test atteint transitivement). Les tests qui dépendent de `tree-sitter`/`ladybug`/
 `python-igraph`+`leidenalg` se sautent proprement (`pytest.skip`) si le paquet
 correspondant n'est pas installé, plutôt que d'échouer.
 

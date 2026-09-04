@@ -266,6 +266,27 @@ MINIFIED_SUFFIXES = ('.min.js', '.min.css', '.bundle.js')
 # Non-code files we still create a bare "file" node for, but never try to extract from.
 PASSTHROUGH_EXTS = {'.md', '.json', '.yaml', '.yml', '.toml', '.sql', '.sh'}
 
+# Test-file recognition -- a directory segment, or a filename shape, that the common
+# test runners key on. Used only to tag `file` nodes with metadata.role ("test" vs
+# "prod") so --impact can split "prod code impacted" from "test files to re-run"; it
+# never changes what is extracted or how a `calls` edge resolves.
+_TEST_DIR_SEGMENTS = {'test', 'tests', '__tests__', 'spec', '__mocks__', 'e2e', 'testdata', 'fixtures'}
+_TEST_FILE_RE = re.compile(
+    r'(^test_.*\.py$)|(_test\.py$)|(^conftest\.py$)'          # pytest / unittest
+    r'|(_test\.go$)'                                          # go
+    r'|(Test\.java$)|(Tests\.java$)|(IT\.java$)'              # junit
+    r'|(_test\.rb$)|(_spec\.rb$)'                             # rspec / minitest
+    r'|(\.test\.[jt]sx?$)|(\.spec\.[jt]sx?$)',                # jest / vitest / jasmine
+    re.IGNORECASE,
+)
+
+
+def is_test_path(rel: str) -> bool:
+    parts = rel.replace('\\', '/').split('/')
+    if any(seg.lower() in _TEST_DIR_SEGMENTS for seg in parts[:-1]):
+        return True
+    return bool(_TEST_FILE_RE.search(parts[-1]))
+
 # == Extraction patterns ======================================================
 # Precise (AST) extraction is used for Python. Everything else is regex + heuristics,
 # which is inherently approximate: it can misfire inside strings/comments, and it has no
@@ -1790,7 +1811,8 @@ class GraphBuilder:
 
         file_id = self._nid("file", rel)
         self.add_node(bucket_nodes, file_id, "file", fp.name, rel, None, None,
-                      {"language": EXT_MAP.get(fp.suffix.lower(), "unknown")})
+                      {"language": EXT_MAP.get(fp.suffix.lower(), "unknown"),
+                       "role": "test" if is_test_path(rel) else "prod"})
 
         ext = fp.suffix.lower()
         lang = EXT_MAP.get(ext)
@@ -3099,6 +3121,10 @@ class GraphBuilder:
             {idx[i]["name"] for i in impacted if idx.get(i, {}).get("type") == "entrypoint"}
         )
 
+        # role of each file, so an impacted symbol can be split prod vs test (v5: #D)
+        file_role = {nd["path"]: (nd.get("metadata") or {}).get("role", "prod")
+                     for nd in self.nodes if nd["type"] == "file"}
+
         results = []
         for i in impacted:
             nd = idx.get(i)
@@ -3107,28 +3133,41 @@ class GraphBuilder:
             _, e = prev[i]
             results.append({
                 "id": i, "name": nd["name"], "type": nd["type"], "path": nd["path"],
-                "depth": dist[i],
+                "depth": dist[i], "role": file_role.get(nd["path"], "prod"),
                 "via": {"type": e["type"], "tag": e["tag"], "confidence": e["confidence"]},
             })
         results.sort(key=lambda r: (r["depth"], -r["via"]["confidence"], r["name"]))
 
+        prod = [r for r in results if r["role"] != "test"]
+        # "tests to re-run" = every test file holding at least one impacted symbol,
+        # i.e. a test whose code transitively exercises the thing being changed.
+        tests_to_run = sorted({r["path"] for r in results if r["role"] == "test"})
+
         if as_json:
             print(json.dumps({
                 "symbol": n["name"], "impacted_count": len(results),
+                "impacted_prod_count": len(prod), "tests_to_run": tests_to_run,
                 "entrypoints_affected": entrypoints_affected, "impacted": results,
             }, indent=2))
             return
 
         print(f"{len(results)} node(s) transitively depend on {n['name']} ({n['path']}) "
               f"via calls/inherits (blast radius, up to {max_depth} hops):")
+        print(f"  {len(prod)} in prod code, {len(results) - len(prod)} in tests")
         print(f"  entrypoints affected: {', '.join(entrypoints_affected) if entrypoints_affected else 'none detected'}")
-        shown = results[:max_print]
+        if tests_to_run:
+            print(f"  test files to re-run ({len(tests_to_run)}):")
+            for p in tests_to_run[:20]:
+                print(f"    {p}")
+            if len(tests_to_run) > 20:
+                print(f"    ... and {len(tests_to_run) - 20} more")
+        shown = prod[:max_print]
         for r in shown:
             print(f"  [depth {r['depth']}] {r['name']}  ({r['path']})  "
                   f"[{r['via']['type']}"
                   + (f", conf={r['via']['confidence']}" if r['via']['type'] == "calls" else "") + "]")
-        if len(results) > max_print:
-            print(f"  ... and {len(results) - max_print} more (use --json for the full list)")
+        if len(prod) > max_print:
+            print(f"  ... and {len(prod) - max_print} more prod node(s) (use --json for the full list)")
 
     # -- graph versioning / diff (v4.4 Phase 5) --------------------------------
     def _load_graph_file(self, path: Path):
