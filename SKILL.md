@@ -364,6 +364,18 @@ optional dependency actually being installed):
   body scan unchanged; a file whose tree-sitter parse fails falls back to it too. One
   incremental build re-parses already-cached JS/TS files once to pick up call sites;
   a full `/graph build` covers them all at once.
+- **File-to-file dependency edges (#C).** After `calls` resolution, the symbol-level
+  `calls`/`inherits` edges are collapsed into one weighted edge per (source file →
+  target file) pair and stored as `graph.json`'s `file_deps` — kept **separate** from
+  `edges` so communities, metrics, `--impact` and `graph.html` are untouched.
+  Low-confidence `calls` edges (< 0.4, i.e. a name shared by several unrelated symbols)
+  are excluded from the aggregation so it doesn't invent a dependency between files
+  that don't reference each other. New `/graph file-deps [FILE|SYMBOL]` command: with
+  an argument, what that file depends on and what depends on it; with none, the whole
+  project's file-dependency list heaviest-first. Answers "which file depends on which"
+  as a lookup over a few hundred entries instead of a walk over thousands of function
+  nodes.
+
 - **`--impact` is test-aware (#D).** Every `file` node is tagged
   `metadata.role` — `"test"` when its path has a test directory segment
   (`tests/`, `__tests__/`, `spec/`, ...) or a test filename shape (`test_*.py`,
@@ -536,6 +548,17 @@ what you're about to change. Test files are recognised by directory segment (`te
 `file` node as `metadata.role` (`"test"` / `"prod"`), so `--explain` on a file shows it
 too. This is a path heuristic, not a test-framework analysis — a helper module living
 under `tests/` counts as test code.
+
+### `/graph file-deps [<file or symbol>]`
+Run `python codegraph_builder.py <path> --file-deps [<file or symbol>]` (v5, #C). Reads
+`graph.json`'s `file_deps` — the `calls`/`inherits` edges aggregated into one weighted
+edge per (source file → target file) pair. With an argument (a file path/substring, or
+a symbol name that resolves to its file): prints what that file depends on and what
+depends on it, each with a call-count weight. With no argument: the whole project's
+file-dependency list, heaviest first. Use this for "what does this file pull in", "what
+breaks if I touch this file", or "what are the hub files" — it's a lookup over a few
+hundred file pairs, not a traversal of every function node, so it stays instant on a
+large project where `--impact` at the symbol level would return thousands of nodes.
 
 ### `/graph query "<question>"`
 Free-form questions don't map to a single CLI flag — this is where Claude's own

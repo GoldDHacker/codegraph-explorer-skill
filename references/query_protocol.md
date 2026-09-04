@@ -32,6 +32,15 @@ dans le processus Python et n'impriment que le résultat.
    via `calls`/`inherits`, avec les entrypoints impactés signalés séparément. À utiliser
    pour "si je change/casse X, qu'est-ce qui est affecté", par opposition à `--callers`
    (un seul saut) ou `--trace-entrypoints` (s'arrête au premier entrypoint atteint).
+   Depuis v5, la sortie sépare le code prod de la liste `tests_to_run` (les fichiers de
+   test qui exercent transitivement le symbole).
+7. **File-deps** : `python codegraph_builder.py <path> --file-deps [<fichier ou symbole>]`
+   (v5, #C) — les dépendances **fichier → fichier** (edges `calls`/`inherits` repliés par
+   paire de fichiers, pondérés). Avec un argument : ce dont ce fichier dépend et ce qui en
+   dépend. Sans argument : toute la liste, la plus lourde d'abord. À utiliser pour "que
+   tire ce fichier", "quels sont les fichiers pivots", "qu'est-ce qui casse si je touche
+   ce fichier" — un lookup sur quelques centaines de paires, pas une traversée de milliers
+   de nœuds `function`.
 6bis. **Cypher** (v4.0, optionnel) : `python codegraph_builder.py <path> --sync-graphdb`
    une fois (exporte `graph.json` vers `.codegraph/graph_db/`, à relancer après tout
    rebuild/`--update` dont les requêtes Cypher doivent voir les changements — ce n'est

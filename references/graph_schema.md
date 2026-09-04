@@ -161,6 +161,9 @@ Notes:
   "god_nodes": ["class:src/core.py:Engine:20", "func:src/utils.py:log:5"],
   "nodes": [...],
   "edges": [...],
+  "file_deps": [
+    {"source": "file:src/core.py", "target": "file:src/util.py", "weight": 4, "via": ["calls"]}
+  ],
   "communities": [
     {
       "id": 1,
@@ -175,6 +178,15 @@ Notes:
 
 Notes:
 - `stats` keys are `node_<type>` counts, not a fixed list — read them dynamically.
+- `file_deps` (v5, #C) is the `calls`/`inherits` edges aggregated to one weighted entry
+  per (source file → target file) pair: `source`/`target` are `file` node ids, `weight`
+  is the number of distinct symbol-level edges behind the pair, `via` lists which edge
+  types contributed. `calls` edges below `confidence` 0.4 are dropped from the
+  aggregation (a name shared by several unrelated symbols would otherwise invent a
+  file dependency); `inherits` and every `calls` edge at 0.4+ count. It is a *derived
+  view*, kept out of `edges` on purpose so every existing edge consumer (communities,
+  `degree`, `--impact`, `graph.html`) is unchanged. Absent from graphs built before v5.
+  Query it with `--file-deps`, don't hand-walk it.
 - `god_nodes` excludes `file`-type nodes on purpose: every symbol has a `contains` edge
   back to its file, so file nodes would otherwise trivially dominate by raw degree and
   bury the actually interesting highly-connected functions/classes.

@@ -41,6 +41,7 @@ Skill pour Claude Code, inspiré de **Graphify** et **Understand Anything**.
 | Les edges `calls` JS/TS venaient d'un scan `\bnom(` du texte du corps : `if (`/`while (`/`catch (` comptés comme des appels, `nom(` en commentaire aussi, méthodes privées ES `#m()` jamais vues, récepteur (`this`, `db`, …) ignoré | Résolution `calls` par AST tree-sitter (post-v4.4, JS/TS) : chaque `call_expression`/`new_expression` réel devient un call site `{name, recv, line}` attribué à la fonction englobante ; `this.m()` se résout vers une méthode de la classe de l'appelant (`resolved_by: "this_method"`, 0.97). Mesuré sur `sindresorhus/got` : +~30 edges de méthodes privées réels, ~115 appels passés d'un `same_file` vague à un `this_method` précis, ~9 faux positifs en commentaire supprimés. Les autres langages gardent le scan de corps inchangé |
 | Le cache incrémental était indexé sur `mtime` seul : `git checkout`, `git stash pop`, `rsync`, `touch` bougent l'horodatage sans toucher au contenu → tout le projet reparsé pour rien | Clé secondaire par hash de contenu (post-v4.4) : `.file_cache.json` stocke un `sha` sha256 ; un `mtime` périmé mais un `sha` identique → servi du cache, `mtime` rafraîchi pour la fois d'après. Le hash n'est calculé que sur le chemin lent (mtime déjà différent) — un arbre inchangé ne coûte rien de plus |
 | `--impact X` mélangeait code prod impacté et tests dans une seule liste — impossible de voir d'un coup d'œil « quels tests relancer » | `--impact` séparé prod / test (post-v4.4, #D) : chaque nœud `file` porte `metadata.role` (`"test"` si segment de dossier `tests/`/`spec/`/… ou nom `test_*.py`/`*_test.go`/`*.test.ts`/… , sinon `"prod"`) ; `--impact` sort la liste détaillée en prod seul + un champ `tests_to_run` listant les fichiers de test qui exercent transitivement le symbole modifié |
+| « Quel fichier dépend de quel fichier ? » obligeait à parcourir des milliers de nœuds `function` | Edges `file → file` agrégés (post-v4.4, #C) : les edges `calls`/`inherits` sont repliés en une arête pondérée par paire (fichier source → fichier cible), stockées à part dans `graph.json["file_deps"]` (pas mélangées aux `edges`). Commande `--file-deps [FICHIER|SYMBOLE]` — dépendances entrantes/sortantes d'un fichier, ou la liste complète triée par poids. Lookup sur ~quelques centaines d'entrées, instantané |
 
 Le détail complet des bugs trouvés et corrigés est dans `SKILL.md` (§ "What changed in v3" … "What changed after v4.4").
 
@@ -80,7 +81,9 @@ modifiés sont reparsés, le JSON est rafraîchi sans doublons.
 /graph callers UserService # --callers côté script : qui appelle/hérite de ce symbole
 /graph path auth payment   # --find-path côté script : plus court chemin pondéré
 /graph entrypoints UserService # --trace-entrypoints côté script : entrypoints les plus proches
-/graph impact UserService  # --impact côté script : fermeture transitive complète (blast radius)
+/graph impact UserService  # --impact côté script : fermeture transitive (blast radius) + prod/test + tests à relancer
+/graph file-deps core/options.ts  # --file-deps : dépendances fichier→fichier (calls/inherits agrégés)
+/graph file-deps           # sans argument : toutes les dépendances fichier→fichier, les plus lourdes d'abord
 /graph query "..."         # NL → Claude choisit quelle(s) commande(s) ci-dessus lancer
 /graph report              # Régénère GRAPH_REPORT.md depuis le JSON existant, sans reparser
 /graph obsidian             # Régénère .codegraph/obsidian_vault/ depuis le JSON existant
@@ -336,9 +339,11 @@ aucun appel D3, verrouillé comme régression), la résolution `calls` par AST J
 `this.m()` → méthode de la même classe, appel dans un callback crédité à la méthode
 englobante, appel nu préférant la fonction libre, `new X()` → classe, import résolu),
 la clé de cache par hash de contenu (`tests/test_incremental_cache.py` : `mtime` bougé
-+ contenu identique → servi du cache), et le `--impact` prod/test
++ contenu identique → servi du cache), le `--impact` prod/test
 (`tests/test_impact_tests.py` : `metadata.role` sur les nœuds `file`, `tests_to_run`,
-test atteint transitivement). Les tests qui dépendent de `tree-sitter`/`ladybug`/
+test atteint transitivement), et les edges `file → file`
+(`tests/test_file_deps.py` : agrégation pondérée, absence dans `edges`, requête par
+fichier et par symbole, liste projet triée par poids). Les tests qui dépendent de `tree-sitter`/`ladybug`/
 `python-igraph`+`leidenalg` se sautent proprement (`pytest.skip`) si le paquet
 correspondant n'est pas installé, plutôt que d'échouer.
 

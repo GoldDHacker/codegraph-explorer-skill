@@ -1874,6 +1874,9 @@ class GraphBuilder:
         # that emits real call_expression callsites (JS/TS today). resolve_references()
         # uses these instead of the regex body-scan for those files -- see there.
         self.ast_callsites = {}
+        # file -> file dependency edges aggregated from calls/inherits (v5, #C):
+        # [{"source": <file node id>, "target": <file node id>, "weight": <int>}]
+        self.file_deps = []
 
     def _merge_cache_into_graph(self):
         """Rebuild self.nodes/self.edges/self.symbol_map fresh from self.file_cache.
@@ -2181,6 +2184,43 @@ class GraphBuilder:
             for name in set(re.findall(r"\b([A-Za-z_]\w*)\s*\(", body)):
                 resolve_one(node, name, None)
 
+    # -- file -> file dependency aggregation (v5, #C) --------------------------
+    def derive_file_deps(self):
+        """Collapse the symbol-level calls/inherits edges into one weighted edge per
+        (source file -> target file) pair, so "which files depend on which" is a lookup
+        over a few hundred entries instead of a walk over thousands of function nodes.
+        Stored separately in graph.json as `file_deps` (not mixed into `edges`, so
+        every existing edge consumer -- communities, metrics, --impact, graph.html --
+        is untouched). Must run after resolve_references() so the `calls` edges exist.
+        `weight` is the number of distinct symbol-level edges behind the file pair;
+        `via` lists which edge types contributed."""
+        sym_path = {n["id"]: n["path"] for n in self.nodes}
+        file_id_of = {n["path"]: n["id"] for n in self.nodes if n["type"] == "file"}
+        agg = {}  # (src_path, tgt_path) -> [weight, {edge types}]
+        for e in self.edges:
+            if e["type"] not in ("calls", "inherits"):
+                continue
+            # Drop the low-confidence `calls` edges (a name shared by several unrelated
+            # symbols -- base_conf 0.35 for 4-8 project-wide candidates, 0.2 for 9+) --
+            # at the file level those would invent a dependency between two files that
+            # don't import each other. Keep `inherits` and every `calls` edge at 0.4+
+            # (RESOLVED tiers, or an INFERRED name with <=3 candidates).
+            if e["type"] == "calls" and e.get("confidence", 1.0) < 0.4:
+                continue
+            sp, tp = sym_path.get(e["source"]), sym_path.get(e["target"])
+            if not sp or not tp or sp == tp:
+                continue
+            if sp not in file_id_of or tp not in file_id_of:
+                continue
+            slot = agg.setdefault((sp, tp), [0, set()])
+            slot[0] += 1
+            slot[1].add(e["type"])
+        self.file_deps = [
+            {"source": file_id_of[sp], "target": file_id_of[tp],
+             "weight": w, "via": sorted(kinds)}
+            for (sp, tp), (w, kinds) in sorted(agg.items(), key=lambda kv: -kv[1][0])
+        ]
+
     # -- community detection ---------------------------------------------------
     def detect_communities(self):
         """Dispatches on self.community_algo (set from --community-algo, default
@@ -2469,6 +2509,7 @@ class GraphBuilder:
         log("[link] merging cache, resolving references, communities, metrics...")
         self._merge_cache_into_graph()
         self.resolve_references()
+        self.derive_file_deps()
         self.detect_communities()
         self.compute_metrics()
 
@@ -2491,6 +2532,7 @@ class GraphBuilder:
             "god_nodes": self.god_nodes,
             "nodes": self.nodes,
             "edges": self.edges,
+            "file_deps": self.file_deps,
             "communities": self.communities,
         }
 
@@ -2536,6 +2578,7 @@ class GraphBuilder:
         self.nodes = graph["nodes"]
         self.node_map = {n["id"]: i for i, n in enumerate(self.nodes)}
         self.edges = graph["edges"]
+        self.file_deps = graph.get("file_deps", [])  # absent in graphs built before v5 #C
         self.communities = graph["communities"]
         self.god_nodes = graph["god_nodes"]
         self.entrypoints = graph["entrypoints"]
@@ -3168,6 +3211,90 @@ class GraphBuilder:
                   + (f", conf={r['via']['confidence']}" if r['via']['type'] == "calls" else "") + "]")
         if len(prod) > max_print:
             print(f"  ... and {len(prod) - max_print} more prod node(s) (use --json for the full list)")
+
+    def cmd_file_deps(self, needle, as_json=False, max_print=40):
+        """--file-deps FILE_OR_SYMBOL: which files this file depends on, and which
+        depend on it, from the aggregated `file_deps` in graph.json (calls/inherits
+        collapsed per file pair). NEEDLE can be a file path/substring or a symbol name
+        (resolved to its file). With no NEEDLE: the whole project's file-dependency
+        list, heaviest first."""
+        idx = {n["id"]: n for n in self.nodes}
+        file_name = {n["id"]: n["path"] for n in self.nodes if n["type"] == "file"}
+
+        if not needle:
+            rows = sorted(self.file_deps, key=lambda d: -d["weight"])
+            if as_json:
+                print(json.dumps({"file_deps": [
+                    {"source": file_name.get(d["source"], d["source"]),
+                     "target": file_name.get(d["target"], d["target"]),
+                     "weight": d["weight"], "via": d["via"]} for d in rows]}, indent=2))
+                return
+            if not rows:
+                print("No file-to-file dependencies (no cross-file calls/inherits edges).")
+                return
+            print(f"{len(rows)} file -> file dependencies (calls/inherits aggregated, heaviest first):")
+            for d in rows[:max_print]:
+                print(f"  {file_name.get(d['source'],'?'):45} -> {file_name.get(d['target'],'?'):45} "
+                      f"x{d['weight']} [{'/'.join(d['via'])}]")
+            if len(rows) > max_print:
+                print(f"  ... and {len(rows) - max_print} more (use --json for the full list)")
+            return
+
+        # resolve NEEDLE to one file path
+        target_path = None
+        matches = self._find_nodes(needle)
+        file_matches = [m for m in matches if m["type"] == "file"]
+        if file_matches:
+            if len({m["path"] for m in file_matches}) > 1:
+                if as_json:
+                    print(json.dumps({"ambiguous": sorted({m["path"] for m in file_matches})}, indent=2))
+                else:
+                    print("Ambiguous -- matches several files:")
+                    for p in sorted({m["path"] for m in file_matches}):
+                        print(f"  {p}")
+                return
+            target_path = file_matches[0]["path"]
+        elif matches:
+            paths = {m["path"] for m in matches}
+            if len(paths) == 1:
+                target_path = paths.pop()
+            else:
+                if as_json:
+                    print(json.dumps({"ambiguous": sorted(paths)}, indent=2))
+                else:
+                    print(f"'{needle}' resolves to symbols in several files -- name a file instead:")
+                    for p in sorted(paths):
+                        print(f"  {p}")
+                return
+        if target_path is None:
+            print(f"No file or symbol matches '{needle}'.")
+            return
+
+        tid = next((fid for fid, p in file_name.items() if p == target_path), None)
+        outgoing = sorted((d for d in self.file_deps if d["source"] == tid), key=lambda d: -d["weight"])
+        incoming = sorted((d for d in self.file_deps if d["target"] == tid), key=lambda d: -d["weight"])
+
+        if as_json:
+            print(json.dumps({
+                "file": target_path,
+                "depends_on": [{"path": file_name.get(d["target"], "?"), "weight": d["weight"], "via": d["via"]}
+                               for d in outgoing],
+                "depended_on_by": [{"path": file_name.get(d["source"], "?"), "weight": d["weight"], "via": d["via"]}
+                                   for d in incoming],
+            }, indent=2))
+            return
+
+        print(f"{target_path}")
+        print(f"  depends on ({len(outgoing)} file(s)):")
+        for d in outgoing[:max_print] or []:
+            print(f"    -> {file_name.get(d['target'],'?')}  x{d['weight']} [{'/'.join(d['via'])}]")
+        if not outgoing:
+            print("    (nothing -- no cross-file calls/inherits out of this file)")
+        print(f"  depended on by ({len(incoming)} file(s)):")
+        for d in incoming[:max_print] or []:
+            print(f"    <- {file_name.get(d['source'],'?')}  x{d['weight']} [{'/'.join(d['via'])}]")
+        if not incoming:
+            print("    (nothing detected)")
 
     # -- graph versioning / diff (v4.4 Phase 5) --------------------------------
     def _load_graph_file(self, path: Path):
@@ -4144,7 +4271,14 @@ def main():
     parser.add_argument("--impact", metavar="SYMBOL",
                          help="Query: full transitive closure of everything that calls/"
                               "inherits from SYMBOL, directly or indirectly (blast radius "
-                              "of a change), plus which of those are entrypoints")
+                              "of a change), plus which of those are entrypoints and which "
+                              "test files re-run")
+    parser.add_argument("--file-deps", nargs="?", const="__ALL__", default=None, metavar="FILE_OR_SYMBOL",
+                         help="Query: file-to-file dependencies (calls/inherits aggregated "
+                              "per file pair). With a FILE path/substring or a SYMBOL name: "
+                              "what that file depends on and what depends on it. With no "
+                              "argument: the whole project's file-dependency list, heaviest "
+                              "first")
     parser.add_argument("--snapshot", metavar="NAME",
                          help="Save the current .codegraph/graph.json as a named snapshot "
                               "(.codegraph/snapshots/NAME.json) to diff against later with "
@@ -4173,7 +4307,8 @@ def main():
         # .codegraph/graph_db/ directly, not graph.json, so it doesn't need (and
         # shouldn't require) load_existing() to succeed first.
         builder.cmd_cypher(args.cypher, as_json=args.json)
-    elif args.explain or args.callers or args.find_path or args.trace_entrypoints or args.impact:
+    elif (args.explain or args.callers or args.find_path or args.trace_entrypoints
+          or args.impact or args.file_deps is not None):
         if not builder.load_existing():
             log("[!] no .codegraph/graph.json yet -- run a build first (no flags, or --update).")
             sys.exit(1)
@@ -4187,6 +4322,8 @@ def main():
             builder.cmd_trace_entrypoints(args.trace_entrypoints, as_json=args.json)
         if args.impact:
             builder.cmd_impact(args.impact, as_json=args.json)
+        if args.file_deps is not None:
+            builder.cmd_file_deps(None if args.file_deps == "__ALL__" else args.file_deps, as_json=args.json)
     elif args.snapshot:
         builder.cmd_snapshot(args.snapshot)
     elif args.diff is not None:
