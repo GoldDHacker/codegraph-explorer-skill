@@ -1,4 +1,4 @@
-# Auto-Build Protocol — Script-First Edition (v4.4)
+# Auto-Build Protocol — Script-First Edition (v4.5)
 
 ## Principe
 Le graphe est construit par un **script local**, pas par Claude. Claude est

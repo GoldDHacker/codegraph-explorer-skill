@@ -1,4 +1,4 @@
-# Graph Schema Reference (v4.4)
+# Graph Schema Reference (v4.5)
 
 This describes the actual shape `codegraph_builder.py` writes to `.codegraph/graph.json`
 — every field below is produced by the current script; nothing here is aspirational.
@@ -150,7 +150,7 @@ Notes:
 ## Graph Object
 ```json
 {
-  "version": "4.4",
+  "version": "4.5",
   "generated_at": "2026-09-01T00:00:00+00:00",
   "project_root": "/path/to/project",
   "stats": {"node_function": 120, "node_class": 45},
@@ -178,14 +178,14 @@ Notes:
 
 Notes:
 - `stats` keys are `node_<type>` counts, not a fixed list — read them dynamically.
-- `file_deps` (v5, #C) is the `calls`/`inherits` edges aggregated to one weighted entry
+- `file_deps` (v4.5, #C) is the `calls`/`inherits` edges aggregated to one weighted entry
   per (source file → target file) pair: `source`/`target` are `file` node ids, `weight`
   is the number of distinct symbol-level edges behind the pair, `via` lists which edge
   types contributed. `calls` edges below `confidence` 0.4 are dropped from the
   aggregation (a name shared by several unrelated symbols would otherwise invent a
   file dependency); `inherits` and every `calls` edge at 0.4+ count. It is a *derived
   view*, kept out of `edges` on purpose so every existing edge consumer (communities,
-  `degree`, `--impact`, `graph.html`) is unchanged. Absent from graphs built before v5.
+  `degree`, `--impact`, `graph.html`) is unchanged. Absent from graphs built before v4.5.
   Query it with `--file-deps`, don't hand-walk it.
 - `god_nodes` excludes `file`-type nodes on purpose: every symbol has a `contains` edge
   back to its file, so file nodes would otherwise trivially dominate by raw degree and

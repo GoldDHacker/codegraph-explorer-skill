@@ -1,4 +1,4 @@
-# CodeGraph Explorer — Script-First Architecture (v4.4)
+# CodeGraph Explorer — Script-First Architecture (v4.5)
 
 ## Description
 Turn any codebase into a queryable knowledge graph. Inspired by Graphify and Understand Anything.
@@ -344,7 +344,11 @@ optional dependency actually being installed):
   known-prefix shape, the generic detector firing, and — the more important half —
   five realistic non-secret values confirmed to NOT be redacted).
 
-## What changed after v4.4 (v5 work in progress)
+## What changed in v4.5
+
+Five independent changes, each verified by running the script and frozen as a pytest
+regression. Nothing here changes what a build produces by default for a language that
+isn't JS/TS.
 
 - **`calls` resolution for JS/TS is AST-driven, not a text scan.** The tree-sitter
   JS/TS walk now emits a real call site (`{name, recv, line}`) for every
@@ -539,7 +543,7 @@ change/break X, what else might break" — `--callers` answers "who calls X dire
 "how far does a change to X actually propagate". If nothing depends on the symbol, it
 says so explicitly rather than an empty list.
 
-The blast radius is split **prod vs test** (v5, #D): the detailed hop-by-hop list is
+The blast radius is split **prod vs test** (v4.5, #D): the detailed hop-by-hop list is
 prod code only, and a separate `tests_to_run` field / "test files to re-run" line names
 every test file holding a symbol in the closure — i.e. the tests that actually exercise
 what you're about to change. Test files are recognised by directory segment (`tests/`,
@@ -550,7 +554,7 @@ too. This is a path heuristic, not a test-framework analysis — a helper module
 under `tests/` counts as test code.
 
 ### `/graph file-deps [<file or symbol>]`
-Run `python codegraph_builder.py <path> --file-deps [<file or symbol>]` (v5, #C). Reads
+Run `python codegraph_builder.py <path> --file-deps [<file or symbol>]` (v4.5, #C). Reads
 `graph.json`'s `file_deps` — the `calls`/`inherits` edges aggregated into one weighted
 edge per (source file → target file) pair. With an argument (a file path/substring, or
 a symbol name that resolves to its file): prints what that file depends on and what

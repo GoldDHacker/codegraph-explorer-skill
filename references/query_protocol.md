@@ -1,4 +1,4 @@
-# Query Protocol — JSON-First (v4.4)
+# Query Protocol — JSON-First (v4.5)
 
 ## Principe
 Toutes les requêtes sont résolues à partir du **graphe**, jamais des sources — mais
@@ -32,22 +32,22 @@ dans le processus Python et n'impriment que le résultat.
    via `calls`/`inherits`, avec les entrypoints impactés signalés séparément. À utiliser
    pour "si je change/casse X, qu'est-ce qui est affecté", par opposition à `--callers`
    (un seul saut) ou `--trace-entrypoints` (s'arrête au premier entrypoint atteint).
-   Depuis v5, la sortie sépare le code prod de la liste `tests_to_run` (les fichiers de
-   test qui exercent transitivement le symbole).
+   Depuis v4.5, la sortie sépare le code prod de la liste `tests_to_run` (les fichiers
+   de test qui exercent transitivement le symbole).
 7. **File-deps** : `python codegraph_builder.py <path> --file-deps [<fichier ou symbole>]`
-   (v5, #C) — les dépendances **fichier → fichier** (edges `calls`/`inherits` repliés par
-   paire de fichiers, pondérés). Avec un argument : ce dont ce fichier dépend et ce qui en
-   dépend. Sans argument : toute la liste, la plus lourde d'abord. À utiliser pour "que
-   tire ce fichier", "quels sont les fichiers pivots", "qu'est-ce qui casse si je touche
-   ce fichier" — un lookup sur quelques centaines de paires, pas une traversée de milliers
-   de nœuds `function`.
-6bis. **Cypher** (v4.0, optionnel) : `python codegraph_builder.py <path> --sync-graphdb`
+   (v4.5, #C) — les dépendances **fichier → fichier** (edges `calls`/`inherits` repliés par
+   paire de fichiers, pondérés, edges `calls` < 0.4 exclus). Avec un argument : ce dont ce
+   fichier dépend et ce qui en dépend. Sans argument : toute la liste, la plus lourde
+   d'abord. À utiliser pour "que tire ce fichier", "quels sont les fichiers pivots",
+   "qu'est-ce qui casse si je touche ce fichier" — un lookup sur quelques centaines de
+   paires, pas une traversée de milliers de nœuds `function`.
+7bis. **Cypher** (v4.0, optionnel) : `python codegraph_builder.py <path> --sync-graphdb`
    une fois (exporte `graph.json` vers `.codegraph/graph_db/`, à relancer après tout
    rebuild/`--update` dont les requêtes Cypher doivent voir les changements — ce n'est
    pas automatique), puis `python codegraph_builder.py <path> --cypher "<requête>"`.
    C'est une couche **parallèle** au moteur JSON + BFS/Dijkstra ci-dessus, jamais un
    remplacement — voir la section dédiée plus bas pour le schéma exact et quand s'en
-   servir plutôt que les commandes 2 à 6.
+   servir plutôt que les commandes 2 à 7.
 7. **Weigh** : pondérer les edges `calls` par leur `confidence` (voir plus bas) en
    synthétisant la réponse.
 8. Ajouter `--json` à n'importe laquelle de ces commandes si la sortie doit être

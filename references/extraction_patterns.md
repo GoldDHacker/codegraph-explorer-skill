@@ -1,4 +1,4 @@
-# Extraction Patterns by Language (v4.4)
+# Extraction Patterns by Language (v4.5)
 
 This lists what `scripts/codegraph_builder.py` actually matches today, not an
 aspirational list. Two extraction paths exist: **tree-sitter** (real AST, optional
@@ -64,7 +64,7 @@ enclosing-class and module-scope state):
 - `call_expression` where the callee is the identifier `require` → `import` node
   (`metadata.style: "require"`), same as the regex engine's `require()` handling.
 - **Every `call_expression` and `new_expression` → a call site** `{name, recv, line}`
-  fed to `resolve_references()` (the v5 line, JS/TS only for now — see CALLSITE_TS_LANGS).
+  fed to `resolve_references()` (v4.5, JS/TS only for now — see CALLSITE_TS_LANGS).
   `foo(...)` → `name "foo"`, `recv None`; `a.b.foo(...)` → `name "foo"`, `recv "a.b"`;
   `new Foo(...)` → `name "Foo"`. A chained/computed callee (`f()()`, `arr[k]()`, a
   tagged template) can't be named against the symbol table and is skipped. Because

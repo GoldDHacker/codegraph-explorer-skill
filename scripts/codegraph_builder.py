@@ -120,7 +120,7 @@ from datetime import datetime, timezone
 from fnmatch import fnmatch
 
 # == Configuration ============================================================
-VERSION = "4.4"
+VERSION = "4.5"
 GRAPH_DIR = ".codegraph"
 GRAPH_FILE = "graph.json"
 CACHE_FILE = ".file_cache.json"
@@ -191,7 +191,7 @@ except ImportError:
 
 # Languages whose tree-sitter walk emits real call_expression call sites (fed to
 # resolve_references() instead of the regex `\bname(` body scan). Started as JS/TS in
-# the v5 line; Go/Rust/Java/C/C++/PHP still use the body scan until their walks learn
+# the v4.5 line; Go/Rust/Java/C/C++/PHP still use the body scan until their walks learn
 # the same, and Ruby/Swift/Kotlin have no tree-sitter engine at all.
 CALLSITE_TS_LANGS = {'javascript', 'typescript'}
 
@@ -1874,7 +1874,7 @@ class GraphBuilder:
         # that emits real call_expression callsites (JS/TS today). resolve_references()
         # uses these instead of the regex body-scan for those files -- see there.
         self.ast_callsites = {}
-        # file -> file dependency edges aggregated from calls/inherits (v5, #C):
+        # file -> file dependency edges aggregated from calls/inherits (v4.5, #C):
         # [{"source": <file node id>, "target": <file node id>, "weight": <int>}]
         self.file_deps = []
 
@@ -2184,7 +2184,7 @@ class GraphBuilder:
             for name in set(re.findall(r"\b([A-Za-z_]\w*)\s*\(", body)):
                 resolve_one(node, name, None)
 
-    # -- file -> file dependency aggregation (v5, #C) --------------------------
+    # -- file -> file dependency aggregation (v4.5, #C) -----------------------
     def derive_file_deps(self):
         """Collapse the symbol-level calls/inherits edges into one weighted edge per
         (source file -> target file) pair, so "which files depend on which" is a lookup
@@ -2578,7 +2578,7 @@ class GraphBuilder:
         self.nodes = graph["nodes"]
         self.node_map = {n["id"]: i for i, n in enumerate(self.nodes)}
         self.edges = graph["edges"]
-        self.file_deps = graph.get("file_deps", [])  # absent in graphs built before v5 #C
+        self.file_deps = graph.get("file_deps", [])  # absent in graphs built before v4.5 (#C)
         self.communities = graph["communities"]
         self.god_nodes = graph["god_nodes"]
         self.entrypoints = graph["entrypoints"]
@@ -3164,7 +3164,7 @@ class GraphBuilder:
             {idx[i]["name"] for i in impacted if idx.get(i, {}).get("type") == "entrypoint"}
         )
 
-        # role of each file, so an impacted symbol can be split prod vs test (v5: #D)
+        # role of each file, so an impacted symbol can be split prod vs test (v4.5, #D)
         file_role = {nd["path"]: (nd.get("metadata") or {}).get("role", "prod")
                      for nd in self.nodes if nd["type"] == "file"}
 
@@ -3636,6 +3636,7 @@ def _build_report_context(builder, graph):
 
     return {
         "PROJECT_NAME": builder.root.name,
+        "VERSION": graph.get("version", VERSION),
         "DATE": graph["generated_at"],
         "TOTAL_NODES": graph["total_nodes"],
         "TOTAL_EDGES": graph["total_edges"],

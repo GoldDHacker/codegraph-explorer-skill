@@ -1,4 +1,4 @@
-r"""AST-driven `calls` resolution for JS/TS (the v5 line).
+r"""AST-driven `calls` resolution for JS/TS (v4.5).
 
 Instead of scanning a function body with `re.findall(r"\bname\(")`, the tree-sitter
 JS/TS walk now emits real `call_expression` / `new_expression` call sites (name +
