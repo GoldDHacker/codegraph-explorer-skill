@@ -1,3 +1,8 @@
 # Keep GitHub's language stats meaningful: the skill is the Python script + its docs.
 docs/graph-preview.svg linguist-generated
 *.md                   linguist-documentation
+
+# The skill loader parses SKILL.md's YAML frontmatter; keep it LF so a CRLF checkout
+# on Windows can't confuse the parser. The Python script and its own newlines don't care.
+SKILL.md               text eol=lf
+scripts/codegraph_builder.py text eol=lf

@@ -1,3 +1,9 @@
+---
+name: codegraph
+description: Turn any codebase into a queryable knowledge graph so architecture and dependency questions are answered from the graph instead of by re-reading source files. A local, dependency-free Python script parses the project once into .codegraph/graph.json; Claude then queries it with small commands (--explain, --callers, --find-path, --trace-entrypoints, --impact, --file-deps) or reads GRAPH_REPORT.md, and never loads the whole JSON or opens source files just to reason about structure. Use this whenever the user asks how a codebase is organized, what calls or subclasses a symbol, what depends on it, what would break if they change it, how two parts of the system connect, where the entry points are, which tests to re-run after a change, or which files depend on which — and any time you would otherwise open many files just to map out how the code fits together. Also triggers on "/graph" and "/codegraph".
+license: MIT
+---
+
 # CodeGraph Explorer — Script-First Architecture (v4.5)
 
 ## Description
@@ -19,7 +25,10 @@ Claude's role: **Orchestrator + Query Engine**
 Claude NEVER: reads raw source files to build the graph, uses regex in reasoning, parses code token-by-token.
 
 ## Invocation
-/graph [command] [args]
+The skill is `codegraph` — it auto-triggers on the architecture/dependency questions in
+the description above, or the user can call `/codegraph`. Its own commands are written
+`/graph <command> [args]` throughout this file (e.g. `/graph build`, `/graph explain
+UserService`) — that's the skill's command vocabulary, map it to the flags shown.
 
 ## What changed in v3
 
