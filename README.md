@@ -37,8 +37,9 @@ Skill pour Claude Code, inspiré de **Graphify** et **Understand Anything**.
 | Les communautés étaient toujours un regroupement par dossier, même quand la vraie relation fonctionnelle traversait plusieurs dossiers (un handler et le service qu'il appelle systématiquement, par exemple) | Clustering **Leiden** optionnel sur les edges `calls`/`inherits` (v4.4, `--community-algo {auto,directory,leiden}`, `pip install python-igraph leidenalg` — wheels précompilées, aucun compilateur requis) : `auto` (défaut) l'utilise si installé, sinon retombe sur l'ancienne heuristique par dossier, sans jamais changer la forme de `communities` en sortie |
 | Aucun moyen de savoir ce qu'un build a changé, ni de comparer l'état du graphe à un point de référence choisi | `--diff [nom]` + `--snapshot <nom>` (v4.4) : `--diff` sans nom compare au build précédent (rotation automatique, zéro préparation) ; `--snapshot`/`--diff <nom>` compare à un point nommé explicitement, qui survit à autant de builds qu'on veut. Limite documentée : un symbole qui n'a fait que *bouger* (id de nœud incluant son numéro de ligne) apparaît en `removed`+`added`, jamais en `changed` |
 | Le scanner de secrets ne couvrait que 3 formes (mot-clé=valeur, clé AWS, bearer token) | Redaction élargie (v4.4) : préfixes GitHub/GitLab/Slack/Stripe/npm documentés, webhooks Slack, marqueurs de clé privée PEM, JWT (préfixe `eyJ` quasi certain), et un détecteur générique par entropie de Shannon pour un secret sans mot-clé ni préfixe reconnu — calibré empiriquement contre des valeurs réalistes non sensibles (hash sha256, UUID, identifiant camelCase, chaîne de version) pour éviter les faux positifs plutôt que de deviner un seuil |
+| Entre v3.4 et v4.4, `graph.html` avait régressé en rechargeant D3 depuis `https://d3js.org` — page blanche à l'ouverture hors-ligne, alors que le `SKILL.md` continuait de le qualifier de « self-contained » | Renderer sans dépendance restauré (post-v4.4) : petite simulation de forces vélocité-Verlet faite main, SVG à la main, pan/zoom/glisser/recherche/légende en vanilla, aucun `<script src>`, aucun CDN. Récupère aussi le focus sur les voisins que la version D3 avait perdu. Vérifié avec `window.d3 === undefined` et zéro erreur console |
 
-Le détail complet des bugs trouvés et corrigés est dans `SKILL.md` (§ "What changed in v3").
+Le détail complet des bugs trouvés et corrigés est dans `SKILL.md` (§ "What changed in v3" … "What changed after v4.4").
 
 ## 🚀 Installation
 
@@ -184,7 +185,7 @@ python codegraph_builder.py /chemin/vers/projet --cypher "MATCH (n:Symbol) RETUR
 |---------|-------------|
 | `.codegraph/graph.json` | Graphe complet (machine-readable) |
 | `.codegraph/GRAPH_REPORT.md` | Résumé humain, généré depuis `templates/graph_report.md` |
-| `.codegraph/graph.html` | Exploration interactive D3.js : panneau latéral au clic, recherche par nom, filtre par type de nœud. Pour l'utilisateur, pas pour Claude — même volumineux que `graph.json` |
+| `.codegraph/graph.html` | Exploration interactive **auto-contenue** (rendu force sans dépendance : plus de D3/CDN, s'ouvre hors-ligne) : panneau latéral au clic avec focus sur les voisins, recherche par nom, filtre par type, glisser un nœud pour l'épingler. Pour l'utilisateur, pas pour Claude — aussi volumineux que `graph.json` |
 | `.codegraph/.file_cache.json` | Cache interne par fichier (mtime + nœuds/edges extraits) — sert au mode incrémental et au shrink-guard |
 | `.codegraph/obsidian_vault/` | Une note Markdown par nœud, `[[wikilinkée]]` — généré uniquement sur demande (`--export-obsidian`), jamais par un build normal |
 | `.codegraph/graph_db/` | Base de graphe embarquée Ladybug (tables génériques `Symbol`/`Edge`), interrogeable en Cypher — généré uniquement sur demande (`--sync-graphdb`), jamais par un build normal ; nécessite `pip install ladybug` |
@@ -318,7 +319,9 @@ repli sous 5 edges (`tests/test_community_leiden.py`), le diff/snapshot de graph
 compris la limite documentée du symbole déplacé verrouillée comme régression
 (`tests/test_graph_diff.py`), et les nouveaux formats de secrets redigés plus les
 non-régressions sur des valeurs bénignes réalistes (extension de `TestRedact` dans
-`tests/test_unit_helpers.py`). Les tests qui dépendent de `tree-sitter`/`ladybug`/
+`tests/test_unit_helpers.py`), et — post-v4.4 — le fait que `graph.html` reste sans
+dépendance externe (`tests/test_html_offline.py` : aucun `<script src>`, aucun CDN,
+aucun appel D3, verrouillé comme régression). Les tests qui dépendent de `tree-sitter`/`ladybug`/
 `python-igraph`+`leidenalg` se sautent proprement (`pytest.skip`) si le paquet
 correspondant n'est pas installé, plutôt que d'échouer.
 

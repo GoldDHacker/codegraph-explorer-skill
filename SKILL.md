@@ -344,6 +344,20 @@ optional dependency actually being installed):
   known-prefix shape, the generic detector firing, and — the more important half —
   five realistic non-secret values confirmed to NOT be redacted).
 
+## What changed after v4.4 (v5 work in progress)
+
+- **`graph.html` is genuinely offline again.** Between v3.4 and v4.4 the renderer
+  regressed to loading D3 from `https://d3js.org/d3.v7.min.js` — a network dependency
+  that blanks the page the moment it's opened without connectivity, directly
+  contradicting this skill's local-first premise (and the `SKILL.md` line that still
+  called the file "self-contained"). Restored the v3.4 dependency-free renderer: a
+  small hand-rolled velocity-Verlet force simulation, SVG built by hand, vanilla
+  pan/zoom/drag/search/legend, no `<script src>`, no CDN, no build step. It also
+  brings back the neighbour-focus behaviour the D3 version had dropped — selecting a
+  node now fades everything except that node and its direct neighbours. Same feature
+  set as the D3 version otherwise, ~290 lines of embedded JS. Verified by building a
+  graph and opening the result with `window.d3 === undefined` and no console errors.
+
 ## Auto-Build Protocol (Script-First)
 
 ### Rule 1: First Encounter → Generate + Run
@@ -573,11 +587,15 @@ the command still runs and returns whatever `graph_db/` currently holds.
 
 ## `graph.html`: for the human, not for Claude
 
-`graph.html` is a self-contained, clickable exploration view (D3, no build step) meant
+`graph.html` is a **fully self-contained** clickable exploration view — a small
+dependency-free force renderer (no D3, no CDN, no build step), so it opens with zero
+network access, the same local-first guarantee as everything else here. It is meant
 for the *user* to open in their own browser — never read it yourself for context, it
 embeds the same data as `graph.json` and is at least as large. Clicking a node opens a
-side panel with the same information `--explain` prints; the legend toggles node types
-on/off; there's a name search that fades non-matching nodes. On a project with more
+side panel with the same information `--explain` prints and fades everything but that
+node's neighbours; the legend toggles node types on/off; there's a name search that
+fades non-matching nodes; drag a node to pin it, drag the background to pan, scroll to
+zoom. On a project with more
 nodes than a comfortable force-directed layout can show at once, it renders only the
 top ~700 by degree by default, with a banner to raise that limit — the underlying data
 for every node is still there, only the initial simulation is capped. If the user asks

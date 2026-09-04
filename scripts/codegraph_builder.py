@@ -3437,7 +3437,6 @@ def write_html(builder, graph, path: Path):
   @media (max-width: 800px) {{ body {{ flex-direction: column-reverse; }}
                                 aside {{ width: 100%; max-width: 100%; max-height: 50vh; }} }}
 </style>
-<script src="https://d3js.org/d3.v7.min.js"></script>
 </head>
 <body>
 <svg id="graph"></svg>
@@ -3452,6 +3451,10 @@ def write_html(builder, graph, path: Path):
   <div id="legend"></div>
 </aside>
 <script>
+// Dependency-free renderer -- no D3, no CDN, no build step. A small velocity-Verlet
+// force simulation (O(n^2) repulsion is fine for the degree-capped node set), SVG
+// drawn by hand, pan/zoom/drag/search/legend all vanilla. graph.html now opens
+// with zero network access, matching this skill's local-first contract.
 const DATA = {json.dumps(graph)};
 const RENDER_LIMIT_DEFAULT = {render_limit};
 const TYPE_COLORS = {{file:"#8b949e", function:"#58a6ff", class:"#d2a8ff", type:"#ff7b72",
@@ -3462,22 +3465,30 @@ const commName = new Map(DATA.communities.map(c => [c.id, c.name]));
 const hiddenTypes = new Set();
 let renderLimit = RENDER_LIMIT_DEFAULT;
 let searchTerm = "";
+let selectedId = null;
 
-const svg = d3.select("#graph");
-const g = svg.append("g");
-const zoom = d3.zoom().on("zoom", e => g.attr("transform", e.transform));
-svg.call(zoom);
-let linkSel, nodeSel, simulation;
+const SVGNS = "http://www.w3.org/2000/svg";
+const svg = document.getElementById("graph");
+const gRoot = document.createElementNS(SVGNS, "g");
+svg.appendChild(gRoot);
+const gLinks = document.createElementNS(SVGNS, "g"); gRoot.appendChild(gLinks);
+const gNodes = document.createElementNS(SVGNS, "g"); gRoot.appendChild(gNodes);
 
-function resize() {{
+let view = {{ k: 1, x: 0, y: 0 }};
+function applyView() {{ gRoot.setAttribute("transform", `translate(${{view.x}} ${{view.y}}) scale(${{view.k}})`); }}
+
+let simNodes = [], simLinks = [], nodeEls = new Map(), linkEls = [], raf = null, alpha = 0;
+
+function viewport() {{
   const w = window.innerWidth - document.querySelector("aside").offsetWidth;
   const h = window.innerHeight;
-  svg.attr("width", Math.max(w, 100)).attr("height", h);
+  svg.setAttribute("width", Math.max(w, 100));
+  svg.setAttribute("height", h);
   return [Math.max(w, 100), h];
 }}
 
 function buildRender() {{
-  const [width, height] = resize();
+  const [W, H] = viewport();
   const ranked = [...DATA.nodes].sort((a, b) => (b.degree||0) - (a.degree||0));
   const capped = ranked.slice(0, renderLimit);
   const visible = new Set(capped.map(n => n.id));
@@ -3485,8 +3496,8 @@ function buildRender() {{
   const banner = document.getElementById("banner");
   if (DATA.nodes.length > renderLimit) {{
     banner.style.display = "block";
-    banner.innerHTML = `Showing top ${{renderLimit}} of ${{DATA.nodes.length}} nodes (by degree).
-      <input id="limitInput" type="number" min="10" value="${{renderLimit}}"> <button id="limitApply">Apply</button>`;
+    banner.innerHTML = `Showing top ${{renderLimit}} of ${{DATA.nodes.length}} nodes (by degree). `
+      + `<input id="limitInput" type="number" min="10" value="${{renderLimit}}"> <button id="limitApply">Apply</button>`;
     document.getElementById("limitApply").onclick = () => {{
       const v = parseInt(document.getElementById("limitInput").value, 10);
       if (v > 0) {{ renderLimit = v; buildRender(); }}
@@ -3495,54 +3506,158 @@ function buildRender() {{
     banner.style.display = "none";
   }}
 
-  const nodes = capped.map(n => ({{...n}}));
-  const links = DATA.edges.filter(e => visible.has(e.source) && visible.has(e.target))
-    .map(e => ({{...e}}));
-
-  g.selectAll("*").remove();
-
-  linkSel = g.append("g").selectAll("line").data(links).join("line")
-    .attr("class", "link").attr("stroke-width", d => d.type === "contains" ? 1 : 1.4);
-
-  nodeSel = g.append("g").selectAll("circle").data(nodes, d => d.id).join("circle")
-    .attr("class", "node")
-    .attr("r", d => 3 + Math.sqrt(d.degree || 1))
-    .attr("fill", d => TYPE_COLORS[d.type] || "#8b949e")
-    .call(d3.drag().on("start", dragstarted).on("drag", dragged).on("end", dragended))
-    .on("click", (evt, d) => {{ evt.stopPropagation(); selectNode(d.id); }});
-
-  nodeSel.append("title").text(d => `${{d.name}} (${{d.type}})\\n${{d.path}}`);
-
-  simulation = d3.forceSimulation(nodes)
-    .force("link", d3.forceLink(links).id(d => d.id).distance(70))
-    .force("charge", d3.forceManyBody().strength(-180))
-    .force("center", d3.forceCenter(width/2, height/2))
-    .force("collide", d3.forceCollide(d => 5 + Math.sqrt(d.degree || 1)));
-
-  simulation.on("tick", () => {{
-    linkSel.attr("x1", d => d.source.x).attr("y1", d => d.source.y)
-           .attr("x2", d => d.target.x).attr("y2", d => d.target.y);
-    nodeSel.attr("cx", d => d.x).attr("cy", d => d.y);
+  // Deterministic seed positions on a spiral, so the same graph always starts
+  // the same way (and re-running buildRender doesn't jump the layout around).
+  simNodes = capped.map((n, i) => {{
+    const ang = i * 2.399963;               // golden angle
+    const rad = 12 * Math.sqrt(i);
+    return {{ id: n.id, data: n, x: W/2 + rad*Math.cos(ang), y: H/2 + rad*Math.sin(ang),
+             vx: 0, vy: 0, fx: null, fy: null, r: 3 + Math.sqrt(n.degree || 1) }};
   }});
+  const nodeById = new Map(simNodes.map(n => [n.id, n]));
+  simLinks = DATA.edges
+    .filter(e => visible.has(e.source) && visible.has(e.target))
+    .map(e => ({{ s: nodeById.get(e.source), t: nodeById.get(e.target), type: e.type }}))
+    .filter(l => l.s && l.t);
+
+  gLinks.textContent = ""; gNodes.textContent = ""; nodeEls.clear(); linkEls = [];
+  for (const l of simLinks) {{
+    const ln = document.createElementNS(SVGNS, "line");
+    ln.setAttribute("class", "link");
+    ln.setAttribute("stroke-width", l.type === "contains" ? 1 : 1.4);
+    gLinks.appendChild(ln); l.el = ln; linkEls.push(l);
+  }}
+  for (const n of simNodes) {{
+    const c = document.createElementNS(SVGNS, "circle");
+    c.setAttribute("class", "node");
+    c.setAttribute("r", n.r);
+    c.setAttribute("fill", TYPE_COLORS[n.data.type] || "#8b949e");
+    const title = document.createElementNS(SVGNS, "title");
+    title.textContent = `${{n.data.name}} (${{n.data.type}})\n${{n.data.path}}`;
+    c.appendChild(title);
+    c.addEventListener("pointerdown", (ev) => startNodeDrag(ev, n));
+    c.addEventListener("click", (ev) => {{ ev.stopPropagation(); selectNode(n.id); }});
+    gNodes.appendChild(c); nodeEls.set(n.id, c);
+  }}
 
   applyFilters();
+  alpha = 1;
+  if (!raf) tick();
 }}
 
-function dragstarted(e, d) {{ if (!e.active) simulation.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; }}
-function dragged(e, d) {{ d.fx = e.x; d.fy = e.y; }}
-function dragended(e, d) {{ if (!e.active) simulation.alphaTarget(0); d.fx = null; d.fy = null; }}
+function tick() {{
+  const [W, H] = [parseFloat(svg.getAttribute("width")), parseFloat(svg.getAttribute("height"))];
+  const CHARGE = -220, LINK_DIST = 70, LINK_K = 0.04, CENTER_K = 0.02, DAMP = 0.82;
+  // repulsion (naive O(n^2); the node set is degree-capped so this stays smooth)
+  for (let i = 0; i < simNodes.length; i++) {{
+    const a = simNodes[i];
+    for (let j = i + 1; j < simNodes.length; j++) {{
+      const b = simNodes[j];
+      let dx = a.x - b.x, dy = a.y - b.y;
+      let d2 = dx*dx + dy*dy || 0.01;
+      if (d2 > 90000) continue;             // ignore far pairs -- keeps it fast
+      const f = CHARGE / d2;
+      const d = Math.sqrt(d2);
+      const fx = f * dx / d, fy = f * dy / d;
+      a.vx -= fx; a.vy -= fy; b.vx += fx; b.vy += fy;
+    }}
+  }}
+  // link springs
+  for (const l of simLinks) {{
+    let dx = l.t.x - l.s.x, dy = l.t.y - l.s.y;
+    const d = Math.sqrt(dx*dx + dy*dy) || 0.01;
+    const f = (d - LINK_DIST) * LINK_K;
+    const fx = f * dx / d, fy = f * dy / d;
+    l.s.vx += fx; l.s.vy += fy; l.t.vx -= fx; l.t.vy -= fy;
+  }}
+  // centering + integrate
+  for (const n of simNodes) {{
+    n.vx += (W/2 - n.x) * CENTER_K * alpha;
+    n.vy += (H/2 - n.y) * CENTER_K * alpha;
+    if (n.fx !== null) {{ n.x = n.fx; n.y = n.fy; n.vx = 0; n.vy = 0; }}
+    else {{
+      n.vx *= DAMP; n.vy *= DAMP;
+      n.x += n.vx * alpha; n.y += n.vy * alpha;
+    }}
+  }}
+  for (const l of linkEls) {{
+    l.el.setAttribute("x1", l.s.x); l.el.setAttribute("y1", l.s.y);
+    l.el.setAttribute("x2", l.t.x); l.el.setAttribute("y2", l.t.y);
+  }}
+  for (const n of simNodes) {{
+    const el = nodeEls.get(n.id);
+    el.setAttribute("cx", n.x); el.setAttribute("cy", n.y);
+  }}
+  alpha *= 0.985;
+  if (alpha > 0.02) {{ raf = requestAnimationFrame(tick); }} else {{ raf = null; }}
+}}
+function reheat() {{ alpha = Math.max(alpha, 0.4); if (!raf) tick(); }}
 
+// ---------- node drag ----------
+let dragNode = null, dragMoved = false;
+function startNodeDrag(ev, n) {{
+  ev.stopPropagation();
+  dragNode = n; dragMoved = false;
+  n.fx = n.x; n.fy = n.y;
+  svg.setPointerCapture(ev.pointerId);
+  reheat();
+}}
+svg.addEventListener("pointermove", (ev) => {{
+  if (dragNode) {{
+    dragMoved = true;
+    dragNode.fx = (ev.offsetX - view.x) / view.k;
+    dragNode.fy = (ev.offsetY - view.y) / view.k;
+    reheat();
+  }} else if (panning) {{
+    view.x = panStart.vx + (ev.clientX - panStart.x);
+    view.y = panStart.vy + (ev.clientY - panStart.y);
+    applyView();
+  }}
+}});
+svg.addEventListener("pointerup", (ev) => {{
+  if (dragNode) {{ dragNode.fx = null; dragNode.fy = null; dragNode = null; }}
+  panning = false;
+  try {{ svg.releasePointerCapture(ev.pointerId); }} catch (e) {{}}
+}});
+
+// ---------- background pan + wheel zoom ----------
+let panning = false, panStart = null;
+svg.addEventListener("pointerdown", (ev) => {{
+  if (dragNode) return;
+  panning = true;
+  panStart = {{ x: ev.clientX, y: ev.clientY, vx: view.x, vy: view.y }};
+  svg.setPointerCapture(ev.pointerId);
+}});
+svg.addEventListener("wheel", (ev) => {{
+  ev.preventDefault();
+  const factor = ev.deltaY < 0 ? 1.12 : 1 / 1.12;
+  const nk = Math.min(4, Math.max(0.15, view.k * factor));
+  const mx = ev.offsetX, my = ev.offsetY;
+  view.x = mx - (mx - view.x) * (nk / view.k);
+  view.y = my - (my - view.y) * (nk / view.k);
+  view.k = nk;
+  applyView();
+}}, {{ passive: false }});
+svg.addEventListener("click", () => {{ if (!dragMoved) showHome(); }});
+
+// ---------- filters (type toggle + search fade + neighbour focus) ----------
 function applyFilters() {{
-  if (!nodeSel) return;
-  nodeSel.style("display", d => hiddenTypes.has(d.type) ? "none" : null);
-  linkSel.style("display", d => {{
-    const s = byId.get(d.source.id ?? d.source), t = byId.get(d.target.id ?? d.target);
-    return (s && hiddenTypes.has(s.type)) || (t && hiddenTypes.has(t.type)) ? "none" : null;
-  }});
-  if (searchTerm) {{
-    nodeSel.classed("faded", d => !d.name.toLowerCase().includes(searchTerm));
-  }} else {{
-    nodeSel.classed("faded", false);
+  const focus = selectedId
+    ? new Set([selectedId,
+        ...DATA.edges.filter(e => e.source === selectedId).map(e => e.target),
+        ...DATA.edges.filter(e => e.target === selectedId).map(e => e.source)])
+    : null;
+  for (const n of simNodes) {{
+    const el = nodeEls.get(n.id);
+    const hiddenByType = hiddenTypes.has(n.data.type);
+    const fadedBySearch = searchTerm && !n.data.name.toLowerCase().includes(searchTerm);
+    const fadedByFocus = focus && !focus.has(n.id);
+    el.style.display = hiddenByType ? "none" : "";
+    el.classList.toggle("faded", Boolean(fadedBySearch || fadedByFocus));
+  }}
+  for (const l of linkEls) {{
+    const hidden = hiddenTypes.has(l.s.data.type) || hiddenTypes.has(l.t.data.type);
+    l.el.style.display = hidden ? "none" : "";
   }}
 }}
 
@@ -3551,10 +3666,11 @@ const scroll = document.getElementById("scroll");
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({{"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}}[c]));
 
 function showHome() {{
-  scroll.innerHTML = `
-    <p class="hint">Click a node to inspect it. Drag to pan, scroll to zoom.
-    Use the legend below to hide node types, or search above to highlight by name.</p>`;
-  if (nodeSel) nodeSel.classed("faded", false);
+  selectedId = null;
+  scroll.innerHTML = `<p class="hint">Click a node to inspect it. Drag a node to pin it,
+    drag the background to pan, scroll to zoom. Use the legend below to hide node types,
+    or search above to highlight by name.</p>`;
+  applyFilters();
 }}
 
 function edgesTouching(id) {{
@@ -3563,7 +3679,6 @@ function edgesTouching(id) {{
     inc: DATA.edges.filter(e => e.target === id),
   }};
 }}
-
 function edgeLine(e, otherId, dir) {{
   const other = byId.get(otherId);
   const label = other ? esc(other.name) : otherId;
@@ -3575,6 +3690,7 @@ function edgeLine(e, otherId, dir) {{
 function selectNode(id) {{
   const n = byId.get(id);
   if (!n) return;
+  selectedId = id;
   const {{ inc, out }} = edgesTouching(id);
   const meta = n.metadata || {{}};
   const metaRows = Object.keys(meta).filter(k => meta[k] !== null && meta[k] !== "" &&
@@ -3591,25 +3707,17 @@ function selectNode(id) {{
     ${{out.length ? `<h2>Uses (${{out.length}})</h2><ul class="edges">${{out.map(e => edgeLine(e, e.target, "&#8594;")).join("")}}</ul>` : ""}}
     ${{inc.length ? `<h2>Used by (${{inc.length}})</h2><ul class="edges">${{inc.map(e => edgeLine(e, e.source, "&#8592;")).join("")}}</ul>` : ""}}
   `;
-  scroll.querySelectorAll("li[data-id]").forEach(el => {{
-    el.onclick = () => selectNode(el.dataset.id);
-  }});
+  scroll.querySelectorAll("li[data-id]").forEach(el => {{ el.onclick = () => selectNode(el.dataset.id); }});
   scroll.scrollTop = 0;
-
-  if (nodeSel) {{
-    const neighborIds = new Set([id, ...inc.map(e => e.source), ...out.map(e => e.target)]);
-    nodeSel.classed("faded", d => !neighborIds.has(d.id));
-  }}
+  applyFilters();
 }}
-
-svg.on("click", () => showHome());
 
 document.getElementById("search").addEventListener("input", e => {{
   searchTerm = e.target.value.trim().toLowerCase();
   applyFilters();
 }});
 
-// ---------- legend (click a type to hide/show it) ----------
+// ---------- legend ----------
 const legend = document.getElementById("legend");
 const typesPresent = [...new Set(DATA.nodes.map(n => n.type))];
 typesPresent.forEach(t => {{
@@ -3625,11 +3733,10 @@ typesPresent.forEach(t => {{
 }});
 const fitChip = document.createElement("div");
 fitChip.className = "chip"; fitChip.textContent = "recenter";
-fitChip.onclick = () => svg.transition().duration(300).call(zoom.transform, d3.zoomIdentity);
+fitChip.onclick = () => {{ view = {{ k: 1, x: 0, y: 0 }}; applyView(); reheat(); }};
 legend.appendChild(fitChip);
 
-window.addEventListener("resize", () => {{ if (simulation) {{ const [w,h] = resize();
-  simulation.force("center", d3.forceCenter(w/2, h/2)).alpha(0.3).restart(); }} }});
+window.addEventListener("resize", () => {{ viewport(); reheat(); }});
 
 buildRender();
 showHome();
