@@ -1,0 +1,3 @@
+# Keep GitHub's language stats meaningful: the skill is the Python script + its docs.
+docs/graph-preview.svg linguist-generated
+*.md                   linguist-documentation

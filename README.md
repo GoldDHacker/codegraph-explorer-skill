@@ -1,311 +1,304 @@
 # 🧠 CodeGraph Explorer — Script-First (v4.5)
 
-Skill pour Claude Code, inspiré de **Graphify** et **Understand Anything**.
+*🇬🇧 English · [🇫🇷 Français](README.fr.md)*
 
-## 🎯 Philosophie : Zero Token Waste
+A skill for Claude Code, inspired by **Graphify** and **Understand Anything**.
 
-> **Claude ne parse jamais de code source. Il exécute un script Python local, puis lit le JSON.**
+<p align="center">
+  <img src="docs/graph-preview.png" alt="CodeGraph Explorer run on its own repository — two force-directed clusters (the builder script and the test suite), function nodes in blue, files in grey, entry points in green" width="680">
+  <br>
+  <em>CodeGraph run on its own source tree — <code>graph.html</code>, the self-contained interactive view (<a href="docs/graph-preview.svg">SVG</a>).</em>
+</p>
 
-| Avant (v2, cassé) | Après (v3) |
+## 🎯 Philosophy: Zero Token Waste
+
+> **Claude never parses source code. It runs a local Python script once, then reads the JSON.**
+
+| Before (v2, broken) | After (v3) |
 |---|---|
-| `codegraph_builder.py` contenait une erreur de syntaxe Python (5 lignes) et plantait avant même de démarrer | Le script compile et tourne, testé sur un mini-projet multi-langage et sur 206 fichiers réels de la stdlib Python |
-| Le mode watch dupliquait tous les edges à chaque rebuild | État reconstruit à neuf depuis un cache par fichier à chaque build — jamais de doublons |
-| `--report` et `--update` ne faisaient rien de différent d'un build complet | `--update` ne reparse que les fichiers modifiés ; `--report` régénère le rapport sans toucher aux sources |
-| Les edges `calls` scannaient tout le fichier, attribuant à chaque fonction tous les appels du fichier | Chaque fonction n'est scannée que dans son propre corps, et la confiance de l'edge reflète l'ambiguïté du nom |
-| C/C++/Ruby/PHP/Swift/Kotlin annoncés mais aucune extraction réelle | Support réel pour les 12 langages listés plus bas |
-| `.gitignore`, redaction des secrets, `custom_patterns.json` documentés mais jamais implémentés | Implémentés (voir portée exacte dans `SKILL.md`) |
-| « Claude lit graph.json » présenté comme ~200 tokens quelle que soit la taille du projet | Mesuré : 31,7 Mo sur 206 fichiers stdlib (~10 500 nœuds) — donc `--explain`/`--callers`/`--find-path` côté script (v3.1, ci-dessous), qui répondent en < 1s sans jamais faire lire le JSON entier à Claude |
-| `graph.html` : tooltip au survol seulement, pas de recherche, illisible au-delà de quelques centaines de nœuds | Panneau latéral cliquable, filtre par type, recherche par nom, plafond de rendu (top 700 par degré, ajustable) sur les gros graphes (v3.1) |
-| `require()` dans un fichier `.ts` était invisible (le pattern existait pour `.js` mais pas pour `.typescript` dans le dict interne) alors qu'il fonctionnait déjà en `.js` | Corrigé (v3.2) — trouvé en testant un vrai petit projet TypeScript (Express + `require()`), pas par relecture |
-| `const Foo = () => {}` (la façon dont s'écrit la plupart des composants React et du code service/handler Node) était invisible sauf si la ligne matchait aussi `export const X = ...` | Capturé comme n'importe quelle fonction, exporté ou non (v3.3) |
-| `confidence` d'un edge `calls` ne dépendait que du nombre de candidats portant le même nom | +0.25 (plafonné à 0.95) quand le fichier appelant importe réellement un fichier qui ressemble à celui du candidat précis — un indice réel, pas juste une coïncidence de nom (v3.3) |
-| « Trouve les points d'entrée de X » demandait de rappeler `--callers` à la main sur chaque appelant jusqu'à tomber sur un entrypoint | `--trace-entrypoints X` fait cette remontée en un seul appel (v3.3) |
-| Les entrypoints JS/TS/Ruby/PHP/Java étaient documentés « corps = fichier entier » mais le scan démarrait en réalité à la ligne du marqueur (`app.listen(...)`, `if __FILE__ == $0`...) jusqu'à la fin — or ce marqueur est typiquement la *dernière* ligne d'une appli Express, donc presque tout ce que fait l'entrypoint était raté | Corrigé : scan du vrai fichier entier, tout en excluant toujours la ligne du marqueur elle-même pour éviter l'auto-référence qui avait causé un faux positif similaire sur Java/Go/Rust une première fois (v3.3) — trouvé en testant `--trace-entrypoints` sur une vraie chaîne d'appels à plusieurs niveaux |
-| Un bug de `.gitignore` a un jour fait planter `discover()` à « 0 fichier trouvé » sur un vrai projet, ce qui aurait pu écraser silencieusement un `graph.json` correct par un graphe vide | Shrink-guard (v3.4) : `build()` refuse désormais de continuer si `discover()` trouve moins de 10 % des fichiers suivis par `.file_cache.json`, avec `--force-rebuild` pour passer outre quand la baisse est réelle et voulue |
-| « 0 token LLM » était une promesse implicite, jamais affichée noir sur blanc au moment du build | Chaque build logge désormais `LLM tokens spent on this build: 0`, et l'en-tête de `GRAPH_REPORT.md` porte la même mention (v3.4) |
-| Exclure quelque chose du graphe sans l'exclure de git obligeait à modifier `.gitignore` lui-même | `.codegraphignore` (v3.4) : même syntaxe, fichier séparé à la racine, fusionné avec `.gitignore` |
-| « Qu'est-ce qui casse si je change X ? » demandait de rappeler `--callers` récursivement à la main | `--impact X` (v3.4) : fermeture transitive complète (pas un seul saut), avec les entrypoints impactés signalés à part |
-| Voir le graphe dans un vrai outil de visualisation de graphe (Obsidian, très demandé chez Graphify) n'était pas possible sans script externe | `--export-obsidian` (v3.4) : une note Markdown par nœud, `[[wikilinkée]]`, dans `.codegraph/obsidian_vault/` — vue graphe native d'Obsidian, zéro plugin |
-| Les méthodes de classe JS/TS/Java étaient invisibles : par regex, `nom(...) {` est indiscernable d'un `if (...) {` ou d'un raccourci de méthode d'objet littéral, donc jamais extrait de façon fiable | Moteur **tree-sitter** optionnel (v4.0, `pip install tree-sitter tree-sitter-javascript tree-sitter-typescript tree-sitter-java`) : un vrai arbre de syntaxe distingue sans ambiguïté un `method_definition`/`method_declaration` — méthodes de classe extraites (avec `private`/`protected`/getter/setter/static/constructeur), edges `calls` désormais résolus même à l'intérieur d'un corps de méthode. Fallback regex automatique par fichier si le paquet manque ou si le parsing échoue — comportement v3 inchangé dans ce cas |
-| Répondre à une question multi-sauts ou une agrégation sur le graphe demandait d'enchaîner plusieurs `--callers`/`--find-path` à la main | **Ladybug/Cypher** en couche parallèle, optionnelle (v4.0, `pip install ladybug`) : `--sync-graphdb` exporte `graph.json` vers `.codegraph/graph_db/`, `--cypher "<requête>"` exécute du vrai Cypher dessus — **s'ajoute** au moteur JSON + BFS/Dijkstra existant, ne le remplace jamais ; `--explain`/`--callers`/`--find-path`/`--trace-entrypoints`/`--impact` restent le chemin par défaut, sans dépendance |
-| Seul le `.gitignore`/`.codegraphignore` à la racine du projet était lu — un vrai monorepo avec des règles par sous-paquet n'était pas couvert | `.gitignore`/`.codegraphignore` imbriqués (v4.1) : tout fichier trouvé sous le projet contribue ses propres motifs, portés à son propre dossier (jamais de fuite vers un dossier voisin sans son propre fichier) |
-| `.codegraph/graph_db/` n'était jamais resynchronisé automatiquement après un rebuild, et rien ne le signalait — une requête `--cypher` pouvait répondre en silence depuis un graphe périmé | Avertissement de fraîcheur (v4.1) : `--cypher` compare désormais le `graph.json` du dernier `--sync-graphdb` à l'actuel et imprime `graph_db/ may be stale -- ...` s'il est périmé — informatif, ne bloque jamais la requête |
-| Relancer `--sync-graphdb` une deuxième fois sur un `graph_db/` déjà existant plantait (`NotADirectoryError`) | Corrigé (v4.1) — cette version de Ladybug stocke la base comme un fichier unique, pas un dossier ; le nettoyage gère les deux cas |
-| Aucune suite de tests automatisée — toute vérification se faisait à l'œil, en session, à chaque changement | Suite pytest (v4.1, `tests/`) couvrant le shrink-guard, le cache incrémental, les 3 bugs tree-sitter trouvés en construisant v4.0, le fallback tree-sitter→regex, le piège Cypher, l'avertissement de fraîcheur et sa correction, les commandes de requête, l'export Obsidian |
-| tree-sitter (v4.0) ne couvrait que JS/TS/Java — Go, Rust, C, C++ et PHP restaient sur le moteur regex (pas de méthodes, pas de `bases`/`inherits` pour C++/PHP, imports groupés Go/Rust invisibles) | tree-sitter étendu à **Go/Rust/C/C++/PHP** (v4.2, chaque paquet de grammaire optionnel et indépendant) : méthodes extraites pour les 5, `inherits` pour Rust (`impl Trait for Type`, même fichier uniquement) et PHP (`extends`+`implements`) et C++ (`class X : public Base`), imports groupés Go (`import (...)`) et Rust (`use ... {...}`) enfin capturés, signatures C/C++ multi-lignes capturées. Fallback regex automatique par fichier si le paquet manque ou si le parsing échoue, comme pour JS/TS/Java |
-| `confidence` d'un edge `calls` ne reflétait que le nombre de candidats homonymes *dans tout le projet*, jamais où le candidat vivait réellement par rapport à l'appelant | Deux tiers de résolution réelle, tag `RESOLVED` (v4.3) : **même fichier** (un seul candidat homonyme défini dans le fichier de l'appelant, `confidence: 0.97`, tous langages) et **import vérifié sur le vrai système de fichiers** (pas une ressemblance de nom, `confidence: 0.93`, imports relatifs JS/TS et chemins de module Python en pointillés). Sinon, retombe sur l'ancien barème `INFERRED`, mais désormais compté sur l'ensemble déjà réduit par la résolution d'import quand elle ne tranche pas complètement |
-| Les communautés étaient toujours un regroupement par dossier, même quand la vraie relation fonctionnelle traversait plusieurs dossiers (un handler et le service qu'il appelle systématiquement, par exemple) | Clustering **Leiden** optionnel sur les edges `calls`/`inherits` (v4.4, `--community-algo {auto,directory,leiden}`, `pip install python-igraph leidenalg` — wheels précompilées, aucun compilateur requis) : `auto` (défaut) l'utilise si installé, sinon retombe sur l'ancienne heuristique par dossier, sans jamais changer la forme de `communities` en sortie |
-| Aucun moyen de savoir ce qu'un build a changé, ni de comparer l'état du graphe à un point de référence choisi | `--diff [nom]` + `--snapshot <nom>` (v4.4) : `--diff` sans nom compare au build précédent (rotation automatique, zéro préparation) ; `--snapshot`/`--diff <nom>` compare à un point nommé explicitement, qui survit à autant de builds qu'on veut. Limite documentée : un symbole qui n'a fait que *bouger* (id de nœud incluant son numéro de ligne) apparaît en `removed`+`added`, jamais en `changed` |
-| Le scanner de secrets ne couvrait que 3 formes (mot-clé=valeur, clé AWS, bearer token) | Redaction élargie (v4.4) : préfixes GitHub/GitLab/Slack/Stripe/npm documentés, webhooks Slack, marqueurs de clé privée PEM, JWT (préfixe `eyJ` quasi certain), et un détecteur générique par entropie de Shannon pour un secret sans mot-clé ni préfixe reconnu — calibré empiriquement contre des valeurs réalistes non sensibles (hash sha256, UUID, identifiant camelCase, chaîne de version) pour éviter les faux positifs plutôt que de deviner un seuil |
-| Entre v3.4 et v4.4, `graph.html` avait régressé en rechargeant D3 depuis `https://d3js.org` — page blanche à l'ouverture hors-ligne, alors que le `SKILL.md` continuait de le qualifier de « self-contained » | Renderer sans dépendance restauré (v4.5) : petite simulation de forces vélocité-Verlet faite main, SVG à la main, pan/zoom/glisser/recherche/légende en vanilla, aucun `<script src>`, aucun CDN. Récupère aussi le focus sur les voisins que la version D3 avait perdu. Vérifié avec `window.d3 === undefined` et zéro erreur console |
-| Les edges `calls` JS/TS venaient d'un scan `\bnom(` du texte du corps : `if (`/`while (`/`catch (` comptés comme des appels, `nom(` en commentaire aussi, méthodes privées ES `#m()` jamais vues, récepteur (`this`, `db`, …) ignoré | Résolution `calls` par AST tree-sitter (v4.5, JS/TS) : chaque `call_expression`/`new_expression` réel devient un call site `{name, recv, line}` attribué à la fonction englobante ; `this.m()` se résout vers une méthode de la classe de l'appelant (`resolved_by: "this_method"`, 0.97). Mesuré sur `sindresorhus/got` : +~30 edges de méthodes privées réels, ~115 appels passés d'un `same_file` vague à un `this_method` précis, ~9 faux positifs en commentaire supprimés. Les autres langages gardent le scan de corps inchangé |
-| Le cache incrémental était indexé sur `mtime` seul : `git checkout`, `git stash pop`, `rsync`, `touch` bougent l'horodatage sans toucher au contenu → tout le projet reparsé pour rien | Clé secondaire par hash de contenu (v4.5) : `.file_cache.json` stocke un `sha` sha256 ; un `mtime` périmé mais un `sha` identique → servi du cache, `mtime` rafraîchi pour la fois d'après. Le hash n'est calculé que sur le chemin lent (mtime déjà différent) — un arbre inchangé ne coûte rien de plus |
-| `--impact X` mélangeait code prod impacté et tests dans une seule liste — impossible de voir d'un coup d'œil « quels tests relancer » | `--impact` séparé prod / test (v4.5, #D) : chaque nœud `file` porte `metadata.role` (`"test"` si segment de dossier `tests/`/`spec/`/… ou nom `test_*.py`/`*_test.go`/`*.test.ts`/… , sinon `"prod"`) ; `--impact` sort la liste détaillée en prod seul + un champ `tests_to_run` listant les fichiers de test qui exercent transitivement le symbole modifié |
-| « Quel fichier dépend de quel fichier ? » obligeait à parcourir des milliers de nœuds `function` | Edges `file → file` agrégés (v4.5, #C) : les edges `calls`/`inherits` sont repliés en une arête pondérée par paire (fichier source → fichier cible), stockées à part dans `graph.json["file_deps"]` (pas mélangées aux `edges`). Commande `--file-deps [FICHIER|SYMBOLE]` — dépendances entrantes/sortantes d'un fichier, ou la liste complète triée par poids. Lookup sur ~quelques centaines d'entrées, instantané |
+| `codegraph_builder.py` had a 5-line Python syntax error and crashed before it even started | The script compiles and runs, tested on a small multi-language project and on 206 real files from the Python stdlib |
+| Watch mode duplicated every edge on each rebuild | State rebuilt from scratch from a per-file cache on every build — never any duplicates |
+| `--report` and `--update` did nothing different from a full build | `--update` only re-parses changed files; `--report` regenerates the report without touching sources |
+| `calls` edges scanned the whole file, attributing every call in a file to every function in it | Each function is scanned only within its own body, and the edge's confidence reflects name ambiguity |
+| C/C++/Ruby/PHP/Swift/Kotlin advertised but no real extraction | Real support for the 12 languages listed below |
+| `.gitignore`, secret redaction, `custom_patterns.json` documented but never implemented | Implemented (see exact scope in `SKILL.md`) |
+| "Claude reads graph.json" presented as ~200 tokens regardless of project size | Measured: 31.7 MB for 206 stdlib files (~10,500 nodes) — hence `--explain`/`--callers`/`--find-path` script-side (v3.1, below), which answer in < 1s without ever making Claude read the whole JSON |
+| `graph.html`: hover tooltip only, no search, unreadable past a few hundred nodes | Clickable side panel, type filter, name search, render cap (top 700 by degree, adjustable) on large graphs (v3.1) |
+| `require()` in a `.ts` file was invisible (the pattern existed for `.js` but not for `.typescript` in the internal dict) even though it already worked in `.js` | Fixed (v3.2) — found by testing a real small TypeScript project (Express + `require()`), not by re-reading |
+| `const Foo = () => {}` (how most React components and Node service/handler code is written) was invisible unless the line also matched `export const X = ...` | Captured like any other function, exported or not (v3.3) |
+| A `calls` edge's `confidence` depended only on the number of candidates sharing the name | +0.25 (capped at 0.95) when the calling file actually imports a file resembling the specific candidate's — a real signal, not just a name coincidence (v3.3) |
+| "Find the entry points to X" meant calling `--callers` by hand on each caller until an entrypoint turned up | `--trace-entrypoints X` does that walk in a single call (v3.3) |
+| JS/TS/Ruby/PHP/Java entrypoints were documented as "body = whole file" but the scan actually started at the marker line (`app.listen(...)`, `if __FILE__ == $0`...) through to the end — and that marker is idiomatically the *last* line of an Express app, so nearly everything the entrypoint does was missed | Fixed: scan the real whole file, while still excluding the marker line itself to avoid the self-reference that had caused a similar false positive on Java/Go/Rust once (v3.3) — found by testing `--trace-entrypoints` on a real multi-level call chain |
+| A `.gitignore` bug once made `discover()` crash to "0 files found" on a real project, which could have silently overwritten a correct `graph.json` with an empty one | Shrink-guard (v3.4): `build()` now refuses to continue if `discover()` finds fewer than 10% of the files tracked by `.file_cache.json`, with `--force-rebuild` to override when the drop is real and intended |
+| "0 LLM tokens" was an implicit promise, never stated plainly at build time | Every build now logs `LLM tokens spent on this build: 0`, and `GRAPH_REPORT.md`'s header carries the same line (v3.4) |
+| Excluding something from the graph without excluding it from git meant editing `.gitignore` itself | `.codegraphignore` (v3.4): same syntax, separate root-level file, merged with `.gitignore` |
+| "What breaks if I change X?" meant calling `--callers` recursively by hand | `--impact X` (v3.4): full transitive closure (not one hop), with affected entrypoints flagged separately |
+| Seeing the graph in a real graph-visualization tool (Obsidian, much requested for Graphify) wasn't possible without an external script | `--export-obsidian` (v3.4): one Markdown note per node, `[[wikilinked]]`, in `.codegraph/obsidian_vault/` — Obsidian's native graph view, zero plugin |
+| JS/TS/Java class methods were invisible: by regex, `name(...) {` is indistinguishable from an `if (...) {` or an object-literal method shorthand, so never reliably extracted | Optional **tree-sitter** engine (v4.0, `pip install tree-sitter tree-sitter-javascript tree-sitter-typescript tree-sitter-java`): a real syntax tree distinguishes a `method_definition`/`method_declaration` unambiguously — class methods extracted (with `private`/`protected`/getter/setter/static/constructor), `calls` edges now resolved even from inside a method body. Automatic per-file regex fallback if the package is missing or parsing fails — v3 behavior unchanged in that case |
+| Answering a multi-hop or aggregation question over the graph meant chaining several `--callers`/`--find-path` by hand | **Ladybug/Cypher** as an optional parallel layer (v4.0, `pip install ladybug`): `--sync-graphdb` exports `graph.json` to `.codegraph/graph_db/`, `--cypher "<query>"` runs real Cypher on it — it **adds to** the existing JSON + BFS/Dijkstra engine, never replaces it; `--explain`/`--callers`/`--find-path`/`--trace-entrypoints`/`--impact` stay the default, dependency-free path |
+| Only the project-root `.gitignore`/`.codegraphignore` was read — a real monorepo with per-package rules wasn't covered | Nested `.gitignore`/`.codegraphignore` (v4.1): any file found under the project contributes its own patterns, scoped to its own directory (never leaking to a sibling folder without its own file) |
+| `.codegraph/graph_db/` was never re-synced automatically after a rebuild, and nothing said so — a `--cypher` query could silently answer from a stale graph | Freshness warning (v4.1): `--cypher` now compares the `graph.json` from the last `--sync-graphdb` to the current one and prints `graph_db/ may be stale -- ...` if stale — informational, never blocks the query |
+| Running `--sync-graphdb` a second time on an existing `graph_db/` crashed (`NotADirectoryError`) | Fixed (v4.1) — this version of Ladybug stores the DB as a single file, not a folder; cleanup handles both cases |
+| No automated test suite — every check was done by eye, in-session, on each change | pytest suite (v4.1, `tests/`) covering the shrink-guard, incremental cache, the 3 tree-sitter bugs found building v4.0, the tree-sitter→regex fallback, the Cypher trap, the freshness warning and its fix, the query commands, the Obsidian export |
+| tree-sitter (v4.0) only covered JS/TS/Java — Go, Rust, C, C++ and PHP stayed on the regex engine (no methods, no `bases`/`inherits` for C++/PHP, grouped Go/Rust imports invisible) | tree-sitter extended to **Go/Rust/C/C++/PHP** (v4.2, each grammar package optional and independent): methods extracted for all 5, `inherits` for Rust (`impl Trait for Type`, same file only), PHP (`extends`+`implements`) and C++ (`class X : public Base`), grouped Go imports (`import (...)`) and Rust (`use ... {...}`) finally captured, multi-line C/C++ signatures captured. Automatic per-file regex fallback if the package is missing or parsing fails, same as JS/TS/Java |
+| A `calls` edge's `confidence` reflected only the number of same-named candidates *project-wide*, never where the candidate actually lived relative to the caller | Two tiers of real resolution, `RESOLVED` tag (v4.3): **same file** (exactly one same-named candidate defined in the caller's file, `confidence: 0.97`, all languages) and **filesystem-verified import** (not a name resemblance, `confidence: 0.93`, JS/TS relative imports and Python dotted module paths). Otherwise falls back to the old `INFERRED` scale, but now counted over the set already narrowed by import resolution when it doesn't fully decide |
+| Communities were always a directory grouping, even when the real functional relationship crossed several directories (a handler and the service it always calls, say) | Optional **Leiden** clustering over `calls`/`inherits` edges (v4.4, `--community-algo {auto,directory,leiden}`, `pip install python-igraph leidenalg` — prebuilt wheels, no compiler needed): `auto` (default) uses it if installed, else falls back to the old directory heuristic, without ever changing the shape of `communities` in the output |
+| No way to know what a build changed, or to compare the graph's state to a chosen reference point | `--diff [name]` + `--snapshot <name>` (v4.4): `--diff` with no name compares to the previous build (auto-rotated, zero setup); `--snapshot`/`--diff <name>` compares to an explicitly named point that survives any number of builds. Documented limit: a symbol that only *moved* (node id includes its line number) shows up as `removed`+`added`, never `changed` |
+| The secret scanner only covered 3 shapes (keyword=value, AWS key, bearer token) | Broader redaction (v4.4): documented GitHub/GitLab/Slack/Stripe/npm prefixes, Slack webhooks, PEM private-key markers, JWT (near-certain `eyJ` prefix), and a generic Shannon-entropy detector for a secret with no keyword or recognized prefix — calibrated empirically against realistic non-sensitive values (sha256 hash, UUID, camelCase identifier, version string) to avoid false positives rather than guessing a threshold |
+| Between v3.4 and v4.4, `graph.html` regressed to loading D3 from `https://d3js.org` — a blank page when opened offline, while `SKILL.md` still called it "self-contained" | Dependency-free renderer restored (v4.5): a small hand-rolled velocity-Verlet force simulation, SVG built by hand, vanilla pan/zoom/drag/search/legend, no `<script src>`, no CDN. Also brings back the neighbour focus the D3 version had dropped. Verified with `window.d3 === undefined` and zero console errors |
+| JS/TS `calls` edges came from a `\bname(` scan of the body text: `if (`/`while (`/`catch (` counted as calls, `name(` in a comment too, ES private methods `#m()` never seen, receiver (`this`, `db`, …) ignored | AST-driven `calls` resolution (v4.5, JS/TS): every real `call_expression`/`new_expression` becomes a `{name, recv, line}` call site attributed to the enclosing function; `this.m()` resolves to a method of the caller's class (`resolved_by: "this_method"`, 0.97). Measured on `sindresorhus/got`: +~30 real private-method edges, ~115 calls moved from a vague `same_file` match to a precise `this_method` one, ~9 comment false positives dropped. Every other language keeps the body scan unchanged |
+| The incremental cache was keyed on `mtime` alone: `git checkout`, `git stash pop`, `rsync`, `touch` move the timestamp without touching content → the whole project re-parsed for nothing | Secondary content-hash key (v4.5): `.file_cache.json` stores a `sha` sha256; a stale `mtime` but a matching `sha` → served from cache, `mtime` refreshed for next time. The hash is only computed on the slow path (mtime already different) — an unchanged tree costs nothing extra |
+| `--impact X` mixed impacted prod code and tests in one list — no way to see "which tests to re-run" at a glance | `--impact` split prod / test (v4.5, #D): every `file` node carries `metadata.role` (`"test"` for a `tests/`/`spec/`/… directory segment or a `test_*.py`/`*_test.go`/`*.test.ts`/… name, else `"prod"`); `--impact` outputs the detailed list as prod only + a `tests_to_run` field listing the test files that transitively exercise the changed symbol |
+| "Which file depends on which file?" meant walking thousands of `function` nodes | Aggregated `file → file` edges (v4.5, #C): `calls`/`inherits` edges collapsed into one weighted edge per (source file → target file) pair, stored separately in `graph.json["file_deps"]` (not mixed into `edges`). `--file-deps [FILE|SYMBOL]` command — a file's incoming/outgoing dependencies, or the whole list sorted by weight. A lookup over a few hundred entries, instant |
 
-Le détail complet des bugs trouvés et corrigés est dans `SKILL.md` (§ "What changed in v3" … "What changed in v4.5").
+The full list of bugs found and fixed is in `SKILL.md` (§ "What changed in v3" … "What changed in v4.5").
 
 ## 🚀 Installation
 
 ```bash
 unzip codegraph-explorer-skill.zip -d ~/.claude/skills/codegraph
-# Redémarre Claude Code
+# Restart Claude Code
 ```
 
-## ✨ Comportement proactif & token-free
+## ✨ Proactive & token-free behavior
 
-### Premier contact
-Claude détecte un projet → exécute `codegraph_builder.py` → lit le JSON.
+### First contact
+Claude detects a project → runs `codegraph_builder.py` → reads the JSON.
 
 ```
 Graph built. 1247 nodes, 3892 edges.
 ```
 
-### Questions architecture
-Pour une question ciblée, Claude appelle `--explain`/`--callers`/`--find-path`/
-`--trace-entrypoints`/`--impact` (le script fait la recherche, Claude ne lit que le
-résultat) ; pour une vue d'ensemble, il lit `GRAPH_REPORT.md`. Il ne charge
-`.codegraph/graph.json` en entier que rarement, et **jamais** les fichiers sources.
+### Architecture questions
+For a targeted question, Claude calls `--explain`/`--callers`/`--find-path`/
+`--trace-entrypoints`/`--impact` (the script does the search, Claude reads only the
+result); for a broad view, it reads `GRAPH_REPORT.md`. It rarely loads
+`.codegraph/graph.json` in full, and **never** the source files.
 
-### Mise à jour
-Code modifié → `codegraph_builder.py --update` (ou mode watch) → seuls les fichiers
-modifiés sont reparsés, le JSON est rafraîchi sans doublons.
+### Update
+Code changed → `codegraph_builder.py --update` (or watch mode) → only changed files are
+re-parsed, the JSON is refreshed without duplicates.
 
-## Commandes
+## Commands
 
 ```
-/graph build               # Rebuild complet (ignore le cache)
-/graph build --watch       # Mode continu (incrémental, surveillance fichiers)
-/graph build --force       # Ignore le shrink-guard (voir plus bas) et force le rebuild
-/graph explain UserService # --explain côté script : métadonnées + edges entrants/sortants
-/graph callers UserService # --callers côté script : qui appelle/hérite de ce symbole
-/graph path auth payment   # --find-path côté script : plus court chemin pondéré
-/graph entrypoints UserService # --trace-entrypoints côté script : entrypoints les plus proches
-/graph impact UserService  # --impact côté script : fermeture transitive (blast radius) + prod/test + tests à relancer
-/graph file-deps core/options.ts  # --file-deps : dépendances fichier→fichier (calls/inherits agrégés)
-/graph file-deps           # sans argument : toutes les dépendances fichier→fichier, les plus lourdes d'abord
-/graph query "..."         # NL → Claude choisit quelle(s) commande(s) ci-dessus lancer
-/graph report              # Régénère GRAPH_REPORT.md depuis le JSON existant, sans reparser
-/graph obsidian             # Régénère .codegraph/obsidian_vault/ depuis le JSON existant
-/graph sync-graphdb        # Exporte le graphe vers .codegraph/graph_db/ (Ladybug, optionnel)
-/graph cypher "..."        # Requête Cypher arbitraire sur graph_db/ (nécessite sync-graphdb)
-/graph snapshot before-refactor  # Checkpoint nommé du graph.json actuel (v4.4)
-/graph diff                # Ce qui a changé depuis le dernier build (v4.4)
-/graph diff before-refactor      # Ce qui a changé depuis ce snapshot nommé (v4.4)
+/graph build               # Full rebuild (ignores the cache)
+/graph build --watch       # Continuous mode (incremental, file watching)
+/graph build --force       # Ignore the shrink-guard (see below) and force the rebuild
+/graph explain UserService # --explain script-side: metadata + incoming/outgoing edges
+/graph callers UserService # --callers script-side: what calls/subclasses this symbol
+/graph path auth payment   # --find-path script-side: weighted shortest path
+/graph entrypoints UserService # --trace-entrypoints script-side: nearest entrypoints
+/graph impact UserService  # --impact script-side: transitive closure (blast radius) + prod/test + tests to re-run
+/graph file-deps core/options.ts  # --file-deps: file→file dependencies (calls/inherits aggregated)
+/graph file-deps           # no argument: all file→file dependencies, heaviest first
+/graph query "..."         # NL → Claude picks which command(s) above to run
+/graph report              # Regenerate GRAPH_REPORT.md from the existing JSON, no re-parse
+/graph obsidian            # Regenerate .codegraph/obsidian_vault/ from the existing JSON
+/graph sync-graphdb        # Export the graph to .codegraph/graph_db/ (Ladybug, optional)
+/graph cypher "..."        # Arbitrary Cypher query over graph_db/ (needs sync-graphdb)
+/graph snapshot before-refactor  # Named checkpoint of the current graph.json (v4.4)
+/graph diff                # What changed since the last build (v4.4)
+/graph diff before-refactor      # What changed since that named snapshot (v4.4)
 ```
 
 ## Architecture
 
 ```
-┌─────────────┐     exécute une fois      ┌──────────────────┐
-│   Claude    │ ───────────────────────→ │ codegraph_builder │
-│  (tokens)   │                          │   .py (local)     │
-│             │ ←─────────────────────── │                    │
-│             │    lit graph.json         │  ast / regex       │
-│             │    (~200 tokens)          │  cache incrémental │
-└─────────────┘                          └──────────────────┘
+┌─────────────┐     runs once             ┌──────────────────┐
+│   Claude    │ ───────────────────────→  │ codegraph_builder │
+│  (tokens)   │                           │   .py (local)     │
+│             │ ←───────────────────────  │                    │
+│             │    reads graph.json        │  ast / regex       │
+│             │    (~200 tokens)           │  incremental cache │
+└─────────────┘                           └──────────────────┘
 ```
 
-## Structure du skill
+## Skill structure
 
 ```
 codegraph/
-├── SKILL.md                         ← Instructions Claude (Script-First)
-├── README.md                        ← Ce fichier
+├── SKILL.md                         ← Claude instructions (Script-First)
+├── README.md                        ← this file (English)
+├── README.fr.md                     ← French version
+├── docs/graph-preview.png|.svg      ← the illustration above
 ├── scripts/
-│   └── codegraph_builder.py         ← Script local (stdlib only, watchdog/tree-sitter/ladybug optionnels)
+│   └── codegraph_builder.py         ← local script (stdlib only, watchdog/tree-sitter/ladybug optional)
 ├── references/
-│   ├── graph_schema.md              ← Schéma JSON + schéma graph_db/ (Ladybug/Cypher)
-│   ├── extraction_patterns.md       ← Patterns par langage (+ tree-sitter JS/TS/Java/Go/Rust/C/C++/PHP) + limites connues
-│   ├── query_protocol.md            ← Protocole de requête JSON (avec pondération par confiance)
-│   └── auto_build_protocol.md       ← Règles d'activation
+│   ├── graph_schema.md              ← JSON schema + graph_db/ schema (Ladybug/Cypher)
+│   ├── extraction_patterns.md       ← per-language patterns (+ tree-sitter JS/TS/Java/Go/Rust/C/C++/PHP) + known limits
+│   ├── query_protocol.md            ← JSON query protocol (with confidence weighting)
+│   └── auto_build_protocol.md       ← activation rules
 ├── templates/
-│   └── graph_report.md              ← Template du rapport (réellement utilisé par le script)
-└── tests/                           ← Suite pytest (dev-only, voir § Tests plus bas)
+│   └── graph_report.md              ← report template (actually used by the script)
+└── tests/                           ← pytest suite (dev-only, see § Tests below)
     ├── conftest.py
     ├── requirements-dev.txt
     └── test_*.py
 ```
 
-## Langages supportés (par le script)
+## Supported languages (by the script)
 
-- **Python** : parsing AST natif (`ast` module) — le plus précis, avec fallback regex si `SyntaxError`
-- **JavaScript/TypeScript (incl. `.tsx`)** : **tree-sitter** (v4.0, optionnel — `pip install tree-sitter tree-sitter-javascript tree-sitter-typescript`) si installé — vrai AST, **méthodes de classe incluses** (private/protected/getter/setter/static/constructeur) ; sinon fallback regex non-ancrées (v3, pas d'extraction au niveau méthode)
-- **Go** : **tree-sitter** (v4.2, optionnel — `pip install tree-sitter tree-sitter-go`) si installé — méthodes scopées au type receveur, imports groupés (`import (...)`) enfin capturés ; sinon fallback regex ancrées (imports groupés invisibles, pas de méthodes)
-- **Rust** : **tree-sitter** (v4.2, optionnel — `pip install tree-sitter tree-sitter-rust`) si installé — méthodes (`impl`/`impl Trait for Type`, avec edge `inherits` vers le trait, **même fichier uniquement**), `use` groupés capturés en entier ; sinon fallback regex ancrées (pas de méthodes, `use` groupés tronqués)
-- **Java** : **tree-sitter** (v4.0, optionnel — `pip install tree-sitter tree-sitter-java`) si installé — classes, interfaces, imports, **et méthodes/constructeurs** ; sinon fallback regex (v3 : classes/interfaces/imports uniquement, voir `references/extraction_patterns.md`)
-- **C** : **tree-sitter** (v4.2, optionnel — `pip install tree-sitter tree-sitter-c`) si installé — signatures multi-lignes capturées ; sinon fallback regex terminées par une accolade (signature entière requise sur une ligne)
-- **C++** : **tree-sitter** (v4.2, optionnel — `pip install tree-sitter tree-sitter-cpp`) si installé — classes, héritage (`bases`/`inherits`), méthodes ; **visibilité des membres non trackée** (tout est `is_public: true`) ; sinon fallback regex (mêmes limites que C, plus aucun héritage)
-- **PHP** : **tree-sitter** (v4.2, optionnel — `pip install tree-sitter tree-sitter-php`) si installé — classes/interfaces, `extends`+`implements` → deux edges `inherits`, méthodes (visibilité/`static`) ; sinon fallback regex (pas d'héritage, pas de méthodes scopées)
-- **Ruby, Swift, Kotlin** : regex ancrées en début de ligne
+- **Python**: native AST parsing (`ast` module) — most precise, with a regex fallback on `SyntaxError`
+- **JavaScript/TypeScript (incl. `.tsx`)**: **tree-sitter** (v4.0, optional — `pip install "tree-sitter>=0.23,<0.25" tree-sitter-javascript tree-sitter-typescript`) if installed — real AST, **class methods included** (private/protected/getter/setter/static/constructor), plus AST-driven `calls` (v4.5); otherwise unanchored regex fallback (v3, no method-level extraction)
+- **Go**: **tree-sitter** (v4.2, optional — `pip install tree-sitter-go`) if installed — methods scoped to the receiver type, grouped imports (`import (...)`) finally captured; otherwise anchored regex fallback (grouped imports invisible, no methods)
+- **Rust**: **tree-sitter** (v4.2, optional — `pip install tree-sitter-rust`) if installed — methods (`impl`/`impl Trait for Type`, with an `inherits` edge to the trait, **same file only**), full grouped `use` captured; otherwise anchored regex fallback (no methods, grouped `use` truncated)
+- **Java**: **tree-sitter** (v4.0, optional — `pip install tree-sitter-java`) if installed — classes, interfaces, imports, **and methods/constructors**; otherwise regex fallback (v3: classes/interfaces/imports only, see `references/extraction_patterns.md`)
+- **C**: **tree-sitter** (v4.2, optional — `pip install tree-sitter-c`) if installed — multi-line signatures captured; otherwise brace-terminated regex fallback (whole signature must be on one line)
+- **C++**: **tree-sitter** (v4.2, optional — `pip install tree-sitter-cpp`) if installed — classes, inheritance (`bases`/`inherits`), methods; **member visibility not tracked** (everything is `is_public: true`); otherwise regex fallback (same limits as C, plus no inheritance)
+- **PHP**: **tree-sitter** (v4.2, optional — `pip install tree-sitter-php`) if installed — classes/interfaces, `extends`+`implements` → two `inherits` edges, methods (visibility/`static`); otherwise regex fallback (no inheritance, no scoped methods)
+- **Ruby, Swift, Kotlin**: anchored line-start regex
 
-Tout autre langage obtient un nœud `file` (langage détecté, sans extraction de symboles),
-sauf si vous ajoutez des patterns dans `.codegraph/custom_patterns.json` (voir `SKILL.md`).
+Any other language gets a `file` node (language detected, no symbol extraction), unless
+you add patterns in `.codegraph/custom_patterns.json` (see `SKILL.md`).
 
-## Le script local
+## The local script
 
-Le script `codegraph_builder.py` est :
-- **100% offline** — aucun appel réseau
-- **Pur Python stdlib** — zéro dépendance obligatoire (`watchdog` optionnel pour le mode watch, sinon fallback en polling 5s ; `tree-sitter`+grammaires optionnel pour l'extraction JS/TS/Java/Go/Rust/C/C++/PHP au niveau méthode, sinon fallback regex v3 ; `ladybug` optionnel pour `--sync-graphdb`/`--cypher`, sans quoi ces deux commandes seules sont indisponibles ; `python-igraph`+`leidenalg` optionnels pour `--community-algo leiden`, sinon `auto` retombe silencieusement sur l'heuristique par dossier)
-- **Extensible** — patterns additionnels dans `.codegraph/custom_patterns.json`
-- **Réellement incrémental** — cache par fichier (`.codegraph/.file_cache.json`), jamais de duplication d'edges même après de nombreux rebuilds
+`codegraph_builder.py` is:
+- **100% offline** — no network calls
+- **Pure Python stdlib** — zero required dependencies (`watchdog` optional for watch mode, else a 5s polling fallback; `tree-sitter`+grammars optional for method-level JS/TS/Java/Go/Rust/C/C++/PHP extraction, else the v3 regex fallback; `ladybug` optional for `--sync-graphdb`/`--cypher`, without which those two commands alone are unavailable; `python-igraph`+`leidenalg` optional for `--community-algo leiden`, else `auto` silently falls back to the directory heuristic)
+- **Extensible** — extra patterns in `.codegraph/custom_patterns.json`
+- **Genuinely incremental** — per-file cache (`.codegraph/.file_cache.json`), never any edge duplication even after many rebuilds
 
-### Dépendances optionnelles
+### Optional dependencies
 
 ```bash
-pip install watchdog                                                          # mode watch réactif
-pip install "tree-sitter>=0.23,<0.25" tree-sitter-javascript tree-sitter-typescript tree-sitter-java  # méthodes + calls AST JS/TS/Java
-pip install tree-sitter-go tree-sitter-rust tree-sitter-c tree-sitter-cpp tree-sitter-php  # méthodes Go/Rust/C/C++/PHP (v4.2)
+pip install watchdog                                                          # responsive watch mode
+pip install "tree-sitter>=0.23,<0.25" tree-sitter-javascript tree-sitter-typescript tree-sitter-java  # methods + AST calls JS/TS/Java
+pip install tree-sitter-go tree-sitter-rust tree-sitter-c tree-sitter-cpp tree-sitter-php  # methods Go/Rust/C/C++/PHP (v4.2)
 pip install ladybug                                                           # --sync-graphdb / --cypher
-pip install python-igraph leidenalg                                          # --community-algo leiden (v4.4, wheels précompilées)
+pip install python-igraph leidenalg                                          # --community-algo leiden (v4.4, prebuilt wheels)
 ```
-> `tree-sitter` **0.26 segfault** en cours de parsing d'un vrai arbre TS avec les
-> grammaires actuelles ; d'où la borne `<0.25`. La 0.23.x est la dernière ligne contre
-> laquelle ce code a été vérifié.
-Chacune est évaluée indépendamment à l'import : l'absence d'une seule (ou de plusieurs)
-ne désactive jamais le reste du script — voir `SKILL.md` § "What changed in v4.0" pour
-le détail du fallback par langage/commande.
+> `tree-sitter` **0.26 segfaults** partway through parsing a real TS tree with the
+> current grammar wheels; hence the `<0.25` bound. 0.23.x is the last line this code
+> has been verified against.
 
-### Utilisation standalone
+Each is evaluated independently at import: the absence of one (or several) never
+disables the rest of the script — see `SKILL.md` § "What changed in v4.0" for the
+per-language/per-command fallback detail.
+
+### Standalone usage
 
 ```bash
-python codegraph_builder.py /chemin/vers/projet             # build complet
-python codegraph_builder.py --update /chemin/vers/projet    # incrémental
-python codegraph_builder.py --watch /chemin/vers/projet     # continu
-python codegraph_builder.py --report /chemin/vers/projet    # régénère juste le rapport
-python codegraph_builder.py --export-obsidian /chemin/vers/projet  # régénère le vault Obsidian
-python codegraph_builder.py --sync-graphdb /chemin/vers/projet     # exporte vers .codegraph/graph_db/ (Ladybug)
-python codegraph_builder.py --force-rebuild /chemin/vers/projet    # bypasse le shrink-guard
-python codegraph_builder.py --verbose /chemin/vers/projet   # diagnostics détaillés
+python codegraph_builder.py /path/to/project             # full build
+python codegraph_builder.py --update /path/to/project    # incremental
+python codegraph_builder.py --watch /path/to/project     # continuous
+python codegraph_builder.py --report /path/to/project    # just regenerate the report
+python codegraph_builder.py --export-obsidian /path/to/project  # regenerate the Obsidian vault
+python codegraph_builder.py --sync-graphdb /path/to/project     # export to .codegraph/graph_db/ (Ladybug)
+python codegraph_builder.py --force-rebuild /path/to/project    # bypass the shrink-guard
+python codegraph_builder.py --verbose /path/to/project   # detailed diagnostics
 
-# requêtes en lecture seule sur le graph.json existant (rien n'est reparsé) :
-python codegraph_builder.py /chemin/vers/projet --explain AuthService
-python codegraph_builder.py /chemin/vers/projet --callers AuthService.login
-python codegraph_builder.py /chemin/vers/projet --find-path AuthService PaymentGateway
-python codegraph_builder.py /chemin/vers/projet --trace-entrypoints AuthService.login
-python codegraph_builder.py /chemin/vers/projet --impact AuthService.login   # blast radius complet
-python codegraph_builder.py /chemin/vers/projet --explain AuthService --json   # sortie structurée
-python codegraph_builder.py /chemin/vers/projet --cypher "MATCH (n:Symbol) RETURN n.name LIMIT 5"  # nécessite --sync-graphdb au préalable
+# read-only queries over the existing graph.json (nothing is re-parsed):
+python codegraph_builder.py /path/to/project --explain AuthService
+python codegraph_builder.py /path/to/project --callers AuthService.login
+python codegraph_builder.py /path/to/project --find-path AuthService PaymentGateway
+python codegraph_builder.py /path/to/project --trace-entrypoints AuthService.login
+python codegraph_builder.py /path/to/project --impact AuthService.login   # full blast radius
+python codegraph_builder.py /path/to/project --file-deps core/options.ts  # file→file dependencies
+python codegraph_builder.py /path/to/project --explain AuthService --json   # structured output
+python codegraph_builder.py /path/to/project --cypher "MATCH (n:Symbol) RETURN n.name LIMIT 5"  # needs --sync-graphdb first
 ```
 
 ## Outputs
 
-| Fichier | Description |
-|---------|-------------|
-| `.codegraph/graph.json` | Graphe complet (machine-readable) |
-| `.codegraph/GRAPH_REPORT.md` | Résumé humain, généré depuis `templates/graph_report.md` |
-| `.codegraph/graph.html` | Exploration interactive **auto-contenue** (rendu force sans dépendance : plus de D3/CDN, s'ouvre hors-ligne) : panneau latéral au clic avec focus sur les voisins, recherche par nom, filtre par type, glisser un nœud pour l'épingler. Pour l'utilisateur, pas pour Claude — aussi volumineux que `graph.json` |
-| `.codegraph/.file_cache.json` | Cache interne par fichier (mtime + `sha` sha256 du contenu + nœuds/edges extraits) — sert au mode incrémental et au shrink-guard |
-| `.codegraph/obsidian_vault/` | Une note Markdown par nœud, `[[wikilinkée]]` — généré uniquement sur demande (`--export-obsidian`), jamais par un build normal |
-| `.codegraph/graph_db/` | Base de graphe embarquée Ladybug (tables génériques `Symbol`/`Edge`), interrogeable en Cypher — généré uniquement sur demande (`--sync-graphdb`), jamais par un build normal ; nécessite `pip install ladybug` |
+| File | Description |
+|------|-------------|
+| `.codegraph/graph.json` | Full graph (machine-readable) |
+| `.codegraph/GRAPH_REPORT.md` | Human summary, generated from `templates/graph_report.md` |
+| `.codegraph/graph.html` | **Self-contained** interactive exploration (dependency-free force renderer: no more D3/CDN, opens offline): click for a side panel with neighbour focus, name search, type filter, drag a node to pin it. For the user, not for Claude — as large as `graph.json` |
+| `.codegraph/.file_cache.json` | Internal per-file cache (mtime + content `sha` sha256 + extracted nodes/edges) — serves incremental mode and the shrink-guard |
+| `.codegraph/obsidian_vault/` | One `[[wikilinked]]` Markdown note per node — generated on demand only (`--export-obsidian`), never by a normal build |
+| `.codegraph/graph_db/` | Embedded Ladybug graph database (generic `Symbol`/`Edge` tables), Cypher-queryable — generated on demand only (`--sync-graphdb`), never by a normal build; needs `pip install ladybug` |
 
-## Limites connues (honnêtement documentées, pas cachées)
+## Known limits (documented honestly, not hidden)
 
-- Les edges `calls` restent fondamentalement une résolution par nom, pas une vraie
-  résolution de portée/type : deux symboles sans rapport portant le même nom peuvent en
-  théorie se retrouver reliés. La *liste* des appels d'une fonction vient d'un vrai AST
-  pour JS/TS (nœuds `call_expression`/`new_expression` — plus de faux `if (`/`while (`,
-  plus de `nom(` en commentaire, méthodes privées `#m()` visibles, récepteur capturé)
-  et d'un scan `\bnom(` du texte du corps partout ailleurs. Côté résolution, trois
-  tiers `RESOLVED` passent devant l'heuristique quand ils s'appliquent — `this.m()`
-  vers une méthode de la classe de l'appelant (`resolved_by: "this_method"`, `0.97`,
-  JS/TS), même fichier (`resolved_by: "same_file"`, `0.97`, tous langages), et import
-  résolu sur le vrai système de fichiers (`resolved_by: "import"`, `0.93`, JS/TS
-  relatifs et chemins Python en pointillés seulement — voir `references/query_protocol.md`).
-  Ailleurs (Go/Rust/Java/PHP/C/C++, ou tout import que la résolution ne parvient pas à
-  faire correspondre), le champ `confidence` d'un edge `tag: INFERRED` reflète le
-  nombre de candidats homonymes restants (0.85 si unique dans l'ensemble considéré,
-  jusqu'à 0.2 si très répandu), plus un bonus `+0.25` (plafonné à 0.95, depuis v3.3)
-  quand le fichier appelant importe quelque chose qui *ressemble* au fichier du
-  candidat précis (comparaison par nom de fichier, pas résolution réelle) — à pondérer
-  en conséquence plutôt qu'à ignorer, et à ne jamais traiter comme une preuve.
-- `.gitignore`/`.codegraphignore` imbriqués (v4.1) : chaque fichier trouvé sous le
-  projet applique ses propres motifs à son propre dossier ; une négation (`!motif`)
-  ne joue que dans son propre fichier — un fichier imbriqué ne peut pas « désignorer »
-  quelque chose qu'un fichier plus haut dans l'arborescence a déjà exclu. Toujours pas
-  spec-complete sur `**`/certains cas `!` complexes, comme le fichier racine avant.
-- La redaction de secrets est une passe regex best-effort sur de courts extraits, pas un
-  scanner de secrets complet.
-- Java / JS/TS, **sans tree-sitter installé** (comportement v3, toujours le fallback si
-  `tree-sitter`/les paquets de grammaire manquent, ou si le parsing d'un fichier
-  échoue) : uniquement classes/interfaces/imports (+ déclarations top-level pour JS/TS),
-  pas les méthodes — regex fiable impossible sans vrai parseur, fort taux de faux
-  positifs sur les getters/setters ou un `if (...) {` confondu avec une méthode. Les
-  appels *à l'intérieur* d'une méthode de classe n'apparaissent alors pas dans
-  `--callers`. **Avec tree-sitter installé** (v4.0 — `pip install tree-sitter
-  tree-sitter-javascript tree-sitter-typescript tree-sitter-java`), cette limite est
-  levée : un vrai arbre de syntaxe extrait les méthodes de classe sans ambiguïté
-  (private/protected/getter/setter/static/constructeur inclus) et les edges `calls`
-  résolvent aussi depuis l'intérieur d'un corps de méthode. Voir
-  `references/extraction_patterns.md` pour le détail par type de nœud.
-- Go/Rust/C/C++/PHP, **sans tree-sitter installé pour ce langage** : mêmes limites que
-  Java/JS/TS sans tree-sitter (voir juste au-dessus) — signatures multi-lignes ratées
-  pour C/C++, imports groupés invisibles pour Go/Rust, pas de méthodes ni d'héritage
-  pour aucun des cinq. **Avec tree-sitter installé** (v4.2 — `pip install
-  tree-sitter-go tree-sitter-rust tree-sitter-c tree-sitter-cpp tree-sitter-php`, tout
-  sous-ensemble), voir `references/extraction_patterns.md` pour le détail par langage ;
-  deux limites documentées y subsistent même avec tree-sitter installé : la liaison
-  `impl Trait for Type` → `inherits` en Rust ne fonctionne que **si le trait et la
-  struct sont dans le même fichier** (pas de résolution inter-fichiers pour l'instant),
-  et la visibilité des membres C++ (`public:`/`private:`) n'est pas trackée du tout
-  (toutes les méthodes de classe sont `is_public: true` par défaut).
-- `--find-path` traite le graphe comme non orienté et pénalise les arêtes `contains` par
-  rapport à `calls`/`inherits`, pour préférer une vraie relation de code à « ces deux
-  symboles sont dans le même fichier » — mais reste un plus-court-chemin pondéré, pas
-  une explication causale.
-- `graph.html` ne simule que les ~700 nœuds de plus haut degré par défaut sur un gros
-  projet (bannière + champ pour ajuster) ; les données de tous les nœuds restent
-  présentes dans le fichier, seule la mise en page initiale est plafonnée.
-- `--impact` hérite de l'imprecision heuristique des edges `calls` (voir plus haut) —
-  plus la profondeur de la fermeture transitive augmente, plus les faux positifs
-  peuvent s'accumuler d'un saut à l'autre ; regarder la `confidence` de chaque saut,
-  pas seulement le nombre total de nœuds impactés.
-- Le shrink-guard (seuil : moins de 10 % des fichiers précédemment suivis, à partir de
-  5 fichiers suivis) est lui aussi une heuristique, pas une détection de bug garantie :
-  une vraie suppression massive et volontaire de fichiers le déclenchera aussi — c'est
-  pour ça que `--force-rebuild` existe plutôt que de bloquer sans échappatoire.
-- `--sync-graphdb`/`--cypher` (v4.0) sont entièrement optionnels (`pip install
-  ladybug`) et n'affectent jamais le moteur JSON + BFS/Dijkstra existant — ce sont deux
-  chantiers strictement parallèles, jamais un remplacement. `graph_db/` n'est pas
-  resynchronisé automatiquement après un rebuild/`--update` : relancer `--sync-graphdb`
-  pour que les requêtes Cypher voient les changements — depuis v4.1, `--cypher` le
-  signale lui-même (`graph_db/ may be stale -- ...`) plutôt que de répondre en silence
-  depuis un graphe périmé, mais ça reste un avertissement, pas une resynchronisation
-  automatique. Une requête filtrant une relation à profondeur variable avec
-  `all(x IN e WHERE ...)` échoue (erreur de type `RECURSIVE_REL`/`LIST`) — passer par
-  une variable de chemin et filtrer `relationships(p)` à la place (voir
-  `references/query_protocol.md`).
-- tree-sitter couvre désormais JS/TS/Java (v4.0) et Go/Rust/C/C++/PHP (v4.2) — soit 8
-  langages sur les 12 supportés ; Ruby/Swift/Kotlin restent en regex uniquement, par
-  choix explicite (pas encore de demande justifiant le chantier), pas par limitation
-  technique de l'approche elle-même.
-- tree-sitter corrige la *structure* (ce qu'est une méthode, un import groupé) mais pas,
-  à lui seul, la désambiguïsation d'un appel entre plusieurs candidats homonymes — c'est
-  le rôle des deux tiers de résolution `RESOLVED` ajoutés en v4.3 (même fichier, import
-  vérifié sur le système de fichiers), qui restent malgré tout un texte scanné et une
-  résolution de chemin, pas une vraie résolution de portée/type : un nom masqué par une
-  définition imbriquée, par exemple, n'est pas modélisé. Voir `confidence` dans
-  `query_protocol.md` pour le détail complet des deux tiers et de l'ancien barème
-  `INFERRED` qui reste le filet de sécurité partout ailleurs.
-- Le clustering Leiden (v4.4) est optionnel et retombe silencieusement sur l'heuristique
-  par dossier en dessous de 5 edges `calls`/`inherits` réels (pas assez de signal pour
-  qu'un clustering veuille dire quoi que ce soit) ; `graph.json` ne porte aucune trace
-  de quel algorithme a produit `communities` — un nom de communauté avec un suffixe
-  `"(+N more dirs)"` est l'indice que c'est Leiden qui a tourné.
-- `--diff`/`--snapshot` (v4.4) comparent par id de nœud, et cet id intègre le numéro de
-  ligne du symbole — un symbole qui a simplement changé de ligne (sans changer lui-même)
-  apparaît en `removed`+`added`, jamais en `changed`. `--diff` sans nom ne voit jamais
-  que l'état d'avant le tout dernier build ; utiliser `--snapshot <nom>` pour un point de
-  comparaison qui survit à plusieurs builds.
-- Le détecteur générique par entropie du scanner de secrets (v4.4) reste un heuristique,
-  pas un scanner fiable : un long littéral à haute entropie mais innocent (un blob
-  encodé, un fixture de test) peut occasionnellement être rédacté à tort, et un vrai
-  secret dont la valeur ressemble à du texte naturel (espaces, ponctuation) peut lui
-  échapper — voir `SKILL.md` § "What changed in v4.4" pour le détail du calibrage.
+- `calls` edges are fundamentally name-based resolution, not real scope/type resolution:
+  two unrelated symbols sharing a name can in theory get linked. The *list* of a
+  function's calls comes from a real AST for JS/TS (`call_expression`/`new_expression`
+  nodes — no more false `if (`/`while (`, no more `name(` in a comment, ES private
+  methods `#m()` visible, receiver captured) and from a `\bname(` body-text scan
+  everywhere else. On the resolution side, three `RESOLVED` tiers come before the
+  heuristic when they apply — `this.m()` to a method of the caller's class
+  (`resolved_by: "this_method"`, `0.97`, JS/TS), same file (`resolved_by: "same_file"`,
+  `0.97`, all languages), and filesystem-verified import (`resolved_by: "import"`,
+  `0.93`, JS/TS relative and Python dotted paths only — see
+  `references/query_protocol.md`). Elsewhere (Go/Rust/Java/PHP/C/C++, or any import the
+  resolution can't match), an `INFERRED` edge's `confidence` reflects the number of
+  remaining same-named candidates (0.85 if unique in the considered set, down to 0.2 if
+  very common), plus a `+0.25` bonus (capped at 0.95, since v3.3) when the calling file
+  imports something that *resembles* the candidate's file (filename-stem comparison, not
+  real resolution) — weigh accordingly rather than ignore, and never treat as proof.
+- Nested `.gitignore`/`.codegraphignore` (v4.1): each file found under the project
+  applies its own patterns to its own directory; a negation (`!pattern`) only acts
+  within its own file — a nested file can't "un-ignore" something a file higher up the
+  tree already excluded. Still not spec-complete on `**`/some complex `!` cases, like
+  the root file before.
+- Secret redaction is a best-effort regex pass over short snippets, not a full secret
+  scanner.
+- Java / JS/TS, **without tree-sitter installed** (v3 behavior, still the fallback if
+  `tree-sitter`/the grammar packages are missing, or if a file fails to parse):
+  classes/interfaces/imports only (+ top-level declarations for JS/TS), no methods —
+  reliable regex is impossible without a real parser, high false-positive rate on
+  getters/setters or an `if (...) {` mistaken for a method. Calls *inside* a class
+  method body then don't appear in `--callers`. **With tree-sitter installed** (v4.0),
+  this limit is lifted. See `references/extraction_patterns.md` for the per-node-type
+  detail.
+- Go/Rust/C/C++/PHP, **without tree-sitter installed for that language**: same limits as
+  Java/JS/TS without tree-sitter — multi-line signatures missed for C/C++, grouped
+  imports invisible for Go/Rust, no methods or inheritance for any of the five. **With
+  tree-sitter installed** (v4.2), two documented limits remain: the `impl Trait for
+  Type` → `inherits` link in Rust only works **if the trait and the struct are in the
+  same file**, and C++ member visibility (`public:`/`private:`) is not tracked at all
+  (all class methods default to `is_public: true`).
+- `--find-path` treats the graph as undirected and penalizes `contains` edges relative
+  to `calls`/`inherits`, to prefer a real code relationship over "these two symbols live
+  in the same file" — but it's still a weighted shortest path, not a causal explanation.
+- `graph.html` only simulates the ~700 highest-degree nodes by default on a large
+  project (banner + field to raise it); every node's data is still in the file, only
+  the initial layout is capped.
+- `--impact` inherits the heuristic imprecision of `calls` edges — the deeper the
+  transitive closure, the more false positives can accumulate hop to hop; look at each
+  hop's `confidence`, not just the total impacted-node count.
+- The shrink-guard (threshold: fewer than 10% of previously-tracked files, from 5
+  tracked files up) is also a heuristic, not guaranteed bug detection: a real, deliberate
+  mass deletion of files will trigger it too — which is why `--force-rebuild` exists
+  rather than blocking with no escape hatch.
+- `--sync-graphdb`/`--cypher` (v4.0) are entirely optional (`pip install ladybug`) and
+  never affect the existing JSON + BFS/Dijkstra engine — two strictly parallel tracks,
+  never a replacement. `graph_db/` is not re-synced automatically after a
+  rebuild/`--update`: re-run `--sync-graphdb` for Cypher queries to see the changes —
+  since v4.1, `--cypher` flags it itself (`graph_db/ may be stale -- ...`) rather than
+  silently answering from a stale graph, but that's a warning, not an auto-resync. A
+  query filtering a variable-depth relationship with `all(x IN e WHERE ...)` fails (a
+  `RECURSIVE_REL`/`LIST` type error) — use a path variable and filter `relationships(p)`
+  instead (see `references/query_protocol.md`).
+- tree-sitter now covers JS/TS/Java (v4.0) and Go/Rust/C/C++/PHP (v4.2) — 8 of the 12
+  supported languages; Ruby/Swift/Kotlin stay regex-only, by explicit choice (no request
+  yet justifying the work), not a technical limit of the approach.
+- tree-sitter fixes the *structure* (what a method is, a grouped import) but not, on its
+  own, disambiguating a call between several same-named candidates — that's the job of
+  the `RESOLVED` tiers, which are still scanned text and path resolution, not real
+  scope/type resolution: a name shadowed by a nested definition, for instance, isn't
+  modeled. See `confidence` in `query_protocol.md`.
+- Leiden clustering (v4.4) is optional and silently falls back to the directory
+  heuristic below 5 real `calls`/`inherits` edges; `graph.json` carries no trace of
+  which algorithm produced `communities` — a community name with a `"(+N more dirs)"`
+  suffix is the tell that Leiden ran.
+- `--diff`/`--snapshot` (v4.4) compare by node id, and that id embeds the symbol's line
+  number — a symbol that merely changed line (without changing itself) shows up as
+  `removed`+`added`, never `changed`. `--diff` with no name only ever sees the state
+  before the very last build; use `--snapshot <name>` for a comparison point that
+  survives several builds.
+- The secret scanner's generic entropy detector (v4.4) is a heuristic, not a reliable
+  scanner: a long innocent high-entropy literal (an encoded blob, a test fixture) may
+  occasionally be redacted wrongly, and a real secret whose value looks like natural
+  text (spaces, punctuation) may slip through — see `SKILL.md` § "What changed in v4.4"
+  for the calibration detail.
 
 ## Tests
 
-Suite pytest dev-only dans `tests/` (n'affecte en rien l'usage normal du skill) :
+Dev-only pytest suite in `tests/` (does not affect normal skill usage):
 
 ```bash
 pip install -r tests/requirements-dev.txt
@@ -313,39 +306,27 @@ cd codegraph-explorer-skill
 python -m pytest tests/ -v
 ```
 
-Couvre le shrink-guard, le cache incrémental/dédup, le `.gitignore`/`.codegraphignore`
-imbriqué (v4.1), les 3 bugs tree-sitter réels trouvés en construisant v4.0 (comme
-régressions figées, pas comme relecture manuelle), le fallback tree-sitter→regex sur un
-fichier syntaxiquement cassé, le piège Cypher `all()`/`relationships(p)`,
-l'avertissement de fraîcheur de `graph_db/` (v4.1) et la correction du crash de
-resync (v4.1), les commandes de requête (`--explain`/`--callers`/`--find-path`/
-`--trace-entrypoints`/`--impact`), l'export Obsidian, et l'extraction tree-sitter
-Go/Rust/C/C++/PHP (v4.2, `tests/test_tree_sitter_extended_languages.py` — imports
-groupés Go, `impl Trait for Type` → `inherits` Rust, signatures multi-lignes C,
-héritage C++, les 4 variantes `require`/`include` PHP, entre autres), et la résolution
-d'appels `RESOLVED` (v4.3, `tests/test_calls_resolution.py` — même fichier, import
-Python/JS-TS résolu sur le vrai système de fichiers à travers une extension différente,
-un spécificateur de paquet nu type `require("lodash")` confirmé jamais traité comme un
-chemin résolvable, et le barème `INFERRED` pré-v4.2 confirmé inchangé quand rien ne se
-résout), et Phase 5 (v4.4) : le clustering Leiden vs l'heuristique par dossier et le
-repli sous 5 edges (`tests/test_community_leiden.py`), le diff/snapshot de graphe y
-compris la limite documentée du symbole déplacé verrouillée comme régression
-(`tests/test_graph_diff.py`), et les nouveaux formats de secrets redigés plus les
-non-régressions sur des valeurs bénignes réalistes (extension de `TestRedact` dans
-`tests/test_unit_helpers.py`), et — v4.5 — le fait que `graph.html` reste sans
-dépendance externe (`tests/test_html_offline.py` : aucun `<script src>`, aucun CDN,
-aucun appel D3, verrouillé comme régression), la résolution `calls` par AST JS/TS
-(`tests/test_calls_ast.py` : `if (`/`while (`/`catch (` jamais comptés comme appels,
-`this.m()` → méthode de la même classe, appel dans un callback crédité à la méthode
-englobante, appel nu préférant la fonction libre, `new X()` → classe, import résolu),
-la clé de cache par hash de contenu (`tests/test_incremental_cache.py` : `mtime` bougé
-+ contenu identique → servi du cache), le `--impact` prod/test
-(`tests/test_impact_tests.py` : `metadata.role` sur les nœuds `file`, `tests_to_run`,
-test atteint transitivement), et les edges `file → file`
-(`tests/test_file_deps.py` : agrégation pondérée, absence dans `edges`, requête par
-fichier et par symbole, liste projet triée par poids). Les tests qui dépendent de `tree-sitter`/`ladybug`/
-`python-igraph`+`leidenalg` se sautent proprement (`pytest.skip`) si le paquet
-correspondant n'est pas installé, plutôt que d'échouer.
+Covers the shrink-guard, incremental cache/dedup, nested `.gitignore`/`.codegraphignore`
+(v4.1), the 3 real tree-sitter bugs found building v4.0 (as frozen regressions, not
+manual review), the tree-sitter→regex fallback on a syntactically broken file, the
+Cypher `all()`/`relationships(p)` trap, the `graph_db/` freshness warning (v4.1) and the
+resync crash fix (v4.1), the query commands
+(`--explain`/`--callers`/`--find-path`/`--trace-entrypoints`/`--impact`), the Obsidian
+export, tree-sitter extraction for Go/Rust/C/C++/PHP (v4.2), `RESOLVED` call resolution
+(v4.3), Phase 5 (v4.4: Leiden vs directory, graph diff/snapshot incl. the moved-symbol
+limit locked as a regression, the new redacted secret formats plus non-regressions on
+realistic benign values), and — v4.5 — `graph.html` staying dependency-free
+(`tests/test_html_offline.py`: no `<script src>`, no CDN, no D3 call, locked as a
+regression), AST-driven JS/TS `calls` resolution (`tests/test_calls_ast.py`:
+`if (`/`while (`/`catch (` never counted as calls, `this.m()` → same-class method, a
+call inside a callback credited to the enclosing method, a bare call preferring the free
+function, `new X()` → class, resolved import), the content-hash cache key
+(`tests/test_incremental_cache.py`: mtime moved + identical content → served from
+cache), the prod/test `--impact` split (`tests/test_impact_tests.py`: `metadata.role` on
+`file` nodes, `tests_to_run`, a transitively-reached test), and `file → file` edges
+(`tests/test_file_deps.py`). Tests that depend on `tree-sitter`/`ladybug`/
+`python-igraph`+`leidenalg` skip cleanly (`pytest.skip`) if the package isn't installed,
+rather than failing.
 
 ## License
 
