@@ -1,0 +1,4 @@
+# Dev/test-only dependencies for this skill's test suite (tests/). Not needed to use
+# codegraph_builder.py itself -- see scripts/codegraph_builder.py's own optional-
+# dependency notes (tree-sitter/ladybug/watchdog) for that.
+pytest>=7
