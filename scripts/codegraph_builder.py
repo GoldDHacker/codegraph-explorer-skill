@@ -188,6 +188,12 @@ try:
 except ImportError:
     pass  # tree-sitter core itself not installed -- TREE_SITTER_LANGS stays empty
 
+# Languages whose tree-sitter walk emits real call_expression call sites (fed to
+# resolve_references() instead of the regex `\bname(` body scan). Started as JS/TS in
+# the v5 line; Go/Rust/Java/C/C++/PHP still use the body scan until their walks learn
+# the same, and Ruby/Swift/Kotlin have no tree-sitter engine at all.
+CALLSITE_TS_LANGS = {'javascript', 'typescript'}
+
 # == Optional: Ladybug (formerly Kuzu) -- embedded graph DB, real Cypher =======
 # Entirely separate from graph.json/extraction: this only powers --sync-graphdb and
 # --cypher, both opt-in. Absence never affects build()/--report/--export-obsidian/
@@ -822,7 +828,8 @@ class GraphBuilder:
             self._ts_parsers[ts_key] = parser
         return parser
 
-    def extract_tree_sitter(self, rel: str, content: str, bucket_nodes, bucket_edges, symtab, lang: str, ts_key: str):
+    def extract_tree_sitter(self, rel: str, content: str, bucket_nodes, bucket_edges, symtab, lang: str, ts_key: str,
+                            bucket_callsites=None):
         try:
             source = content.encode('utf-8', errors='ignore')
             tree = self._ts_parser(ts_key).parse(source)
@@ -1034,9 +1041,37 @@ class GraphBuilder:
                             self.add_node(bucket_nodes, nid, "import", src, rel, line_of(node), line_of(node),
                                           {"style": "require", "raw": redact(first_line(node))})
                             self.add_edge(bucket_edges, file_id, nid, "contains", "EXTRACTED")
+                    _record_js_callsite(fn)
+
+                elif t == 'new_expression':
+                    _record_js_callsite(child(node, 'constructor', 'identifier', 'member_expression'))
 
                 for c in node.children:
                     walk(c, next_class, next_scope)
+
+            def _record_js_callsite(callee):
+                # callee is the call_expression's `function` / new_expression's
+                # `constructor` node. A real AST node here means this is genuinely a
+                # call, so `if (`, `while (`, `switch (`, `catch (`, a bare
+                # parenthesised group -- none of which are call_expression -- never
+                # reach this, which is the whole point of doing it structurally rather
+                # than with `re.findall(r"\bname\(")`. Two callee shapes are named:
+                #   foo(...)        -> identifier            -> name "foo",  recv None
+                #   a.b.foo(...)    -> member_expression     -> name "foo",  recv "a.b"
+                # Anything else (foo()(), arr[k](), tagged templates) can't be named
+                # against the symbol table and is skipped.
+                if bucket_callsites is None or callee is None:
+                    return
+                if callee.type == 'identifier':
+                    bucket_callsites.append({"name": text_of(callee), "recv": None, "line": line_of(callee)})
+                elif callee.type == 'member_expression':
+                    prop = callee.child_by_field_name('property')
+                    obj = callee.child_by_field_name('object')
+                    if prop is not None and prop.type in ('property_identifier', 'private_property_identifier'):
+                        recv = text_of(obj).strip() if obj is not None else None
+                        bucket_callsites.append({"name": text_of(prop),
+                                                 "recv": recv if recv and len(recv) <= 60 else None,
+                                                 "line": line_of(callee)})
 
             walk(tree.root_node, None, True)
 
@@ -1744,6 +1779,13 @@ class GraphBuilder:
         bucket_nodes = []
         bucket_edges = []
         symtab = defaultdict(list)
+        # Real call sites ({"name","recv","line"}) captured from a tree-sitter AST for
+        # the languages that support it (JS/TS today -- see CALLSITE_TS_LANGS). Stays a
+        # list only when such an engine actually ran; left None otherwise so
+        # resolve_references() can tell "tree-sitter file, no calls" from "regex file,
+        # use the body-text scan".
+        bucket_callsites = []
+        emitted_callsites = False
 
         file_id = self._nid("file", rel)
         self.add_node(bucket_nodes, file_id, "file", fp.name, rel, None, None,
@@ -1761,12 +1803,14 @@ class GraphBuilder:
             else:
                 self.extract_custom_only(rel, content, bucket_nodes, bucket_edges, symtab, 'python')
         elif lang in ('javascript', 'typescript', 'java', 'go', 'rust', 'c', 'cpp', 'php') and ts_key in TREE_SITTER_LANGS:
-            ok = self.extract_tree_sitter(rel, content, bucket_nodes, bucket_edges, symtab, lang, ts_key)
+            ok = self.extract_tree_sitter(rel, content, bucket_nodes, bucket_edges, symtab, lang, ts_key,
+                                          bucket_callsites)
             if not ok:
                 vlog(f"tree-sitter extraction failed, falling back to regex: {rel}")
                 self.extract_regex(rel, content, bucket_nodes, bucket_edges, symtab)
             else:
                 self.extract_custom_only(rel, content, bucket_nodes, bucket_edges, symtab, lang)
+                emitted_callsites = lang in CALLSITE_TS_LANGS
         else:
             self.extract_regex(rel, content, bucket_nodes, bucket_edges, symtab)
 
@@ -1777,11 +1821,14 @@ class GraphBuilder:
         except OSError:
             mtime = time.time()
 
-        return {
+        entry = {
             "mtime": mtime,
             "nodes": bucket_nodes,
             "edges": bucket_edges,
         }
+        if emitted_callsites:
+            entry["callsites"] = bucket_callsites
+        return entry
 
     # -- cache merge ------------------------------------------------------
     def _reset_derived_state(self):
@@ -1794,6 +1841,10 @@ class GraphBuilder:
         self.stats = defaultdict(int)
         self.entrypoints = []
         self._edge_seen = set()
+        # {rel: [{"name","recv","line"}, ...]} for files parsed by a tree-sitter engine
+        # that emits real call_expression callsites (JS/TS today). resolve_references()
+        # uses these instead of the regex body-scan for those files -- see there.
+        self.ast_callsites = {}
 
     def _merge_cache_into_graph(self):
         """Rebuild self.nodes/self.edges/self.symbol_map fresh from self.file_cache.
@@ -1801,6 +1852,8 @@ class GraphBuilder:
         guarantees no duplication across repeated runs."""
         self._reset_derived_state()
         for rel, entry in self.file_cache.items():
+            if "callsites" in entry:
+                self.ast_callsites[rel] = entry["callsites"]
             for n in entry["nodes"]:
                 if n["id"] in self.node_map:
                     continue  # defensive: shouldn't happen, ids are file-scoped
@@ -1892,23 +1945,22 @@ class GraphBuilder:
 
         return results
 
-    # -- cross-reference resolution (scoped to each symbol's own body) --------
-    # Two precision fixes versus the original design, both verified against a test
-    # project during rework:
-    #   1. Each function/entrypoint is only searched within its own line_start..line_end
-    #      span, not the whole file -- otherwise every function in a file gets "calls"
-    #      edges to every symbol referenced anywhere else in that same file.
-    #   2. Candidate call targets are limited to function/class/symbol nodes (never
-    #      entrypoint/import/type/variable/file), and only names that actually appear as
-    #      `name(` inside the body are looked up -- not every symbol name in the whole
-    #      codebase checked against every body. This also turns what used to be an
-    #      O(functions x every distinct name in the codebase) scan into
-    #      O(functions x identifiers actually called in that function), which matters on
-    #      anything bigger than a toy project.
-    # This is still a name-based heuristic, not real scope/type resolution: two unrelated
-    # functions named the same thing in different files/languages (a generic `main`,
-    # `get`, `run`...) can still cross-link. Edge confidence stays 0.7 and tag INFERRED
-    # specifically so Claude surfaces that uncertainty rather than treating it as fact.
+    # -- cross-reference resolution ("calls" edges) --------------------------
+    # Two sources of call sites feed one shared resolver (resolve_one below):
+    #   1. AST call sites (self.ast_callsites) -- for languages whose tree-sitter walk
+    #      emits real `call_expression`/`new_expression` nodes (JS/TS today). Structural,
+    #      so `if (`/`while (`/`switch (`/`catch (`/a bare parenthesised group never
+    #      register as calls, and `a.b.foo()` is captured with its receiver `a.b`.
+    #      Each site is credited to the innermost function node covering its line.
+    #   2. A regex `\bname(` scan of each function/entrypoint's own body span -- the
+    #      fallback for Python, the regex languages, the not-yet-converted tree-sitter
+    #      languages (Go/Rust/Java/C/C++/PHP), and any file tree-sitter failed to parse.
+    # Both are still name-based at the resolution step, not full scope/type resolution:
+    # two unrelated symbols sharing a name can cross-link. The tier system (same-class
+    # via `this`, exact same-file, filesystem-verified import, then ambiguity-scored
+    # INFERRED) plus the RESOLVED/INFERRED tag and per-edge confidence exist so Claude
+    # weighs that uncertainty rather than treating an edge as fact -- see
+    # references/query_protocol.md.
     def resolve_references(self):
         callable_types = {"function", "class", "symbol"}
         candidates = defaultdict(list)
@@ -1951,11 +2003,120 @@ class GraphBuilder:
             if resolved:
                 file_resolved_imports[node["path"]].update(resolved)
 
+        # ---- one call site -> zero-or-more "calls" edges. Shared by the AST-callsite
+        #      path and the regex body-scan fallback so the tier logic (same-class via
+        #      `this`, same-file, filesystem-verified import, ambiguity-scored INFERRED)
+        #      lives in exactly one place. `recv` is the receiver text for a
+        #      `recv.name(...)` call (AST path only); None for a bare `name(...)` and
+        #      for every call the regex scan finds, since it can't see receivers.
+        def resolve_one(caller, name, recv):
+            if name == caller["name"] or len(name) < 2:
+                return
+            cid, rel = caller["id"], caller["path"]
+            others = [tid for tid in candidates.get(name, ()) if tid != cid]
+            if not others:
+                return
+
+            # tier 0 (needs a receiver, so AST path only): `this.m()` / `self.m()`
+            # inside a method resolves to a method of the caller's own class in the
+            # same file when that's exactly one candidate -- the one spot where a
+            # receiver token yields real scope information without a type system.
+            caller_class = (caller.get("metadata") or {}).get("class")
+            if recv in ("this", "self") and caller_class:
+                same_class = [tid for tid in others
+                              if ((self.get_node(tid) or {}).get("metadata") or {}).get("class") == caller_class
+                              and (self.get_node(tid) or {}).get("path") == rel]
+                if len(same_class) == 1:
+                    self._add_unique_edge(cid, same_class[0], "calls", "RESOLVED", 0.97,
+                                           {"resolved_by": "this_method"})
+                    return
+
+            # tier 1: exact same-file resolution. If exactly one name-matched candidate
+            # is defined in this very file, a call to that name almost certainly means
+            # the local one. A bare `name(...)` (no receiver) can't be a method call, so
+            # class methods are dropped from the same-file set when a free function of
+            # the name also lives in the file.
+            same_file = [tid for tid in others if (self.get_node(tid) or {}).get("path") == rel]
+            if recv is None and len(same_file) > 1:
+                free = [tid for tid in same_file
+                        if not ((self.get_node(tid) or {}).get("metadata") or {}).get("class")]
+                if free:
+                    same_file = free
+            if len(same_file) == 1:
+                self._add_unique_edge(cid, same_file[0], "calls", "RESOLVED", 0.97,
+                                       {"resolved_by": "same_file"})
+                return
+
+            # tier 2: filesystem-verified import resolution. If the caller's file has an
+            # import that genuinely resolves on disk to exactly one candidate's own
+            # file, that's a resolved path, not a stem coincidence. Narrowing to >1
+            # still beats leaving the full project-wide set for the tier below.
+            resolved_files = file_resolved_imports.get(rel)
+            if resolved_files:
+                import_matches = [tid for tid in others if (self.get_node(tid) or {}).get("path") in resolved_files]
+                if len(import_matches) == 1:
+                    self._add_unique_edge(cid, import_matches[0], "calls", "RESOLVED", 0.93,
+                                           {"resolved_by": "import"})
+                    return
+                if import_matches:
+                    others = import_matches
+
+            # tier 3: ambiguity-scored INFERRED. Confidence reflects how many unrelated
+            # symbols share the name project-wide (a unique `chargeCard` is near-certain;
+            # a `get`/`close`/`run` is barely a guess), plus the import-proximity stem
+            # boost -- see references/query_protocol.md.
+            k = len(others)
+            base_conf = 0.85 if k == 1 else 0.55 if k <= 3 else 0.35 if k <= 8 else 0.2
+            caller_imports = file_import_segments.get(rel)
+            for tid in others:
+                conf = base_conf
+                if caller_imports:
+                    cand = self.get_node(tid)
+                    stem = Path(cand["path"]).stem.lower() if cand else ""
+                    if stem and stem in caller_imports:
+                        conf = min(0.95, conf + 0.25)
+                self._add_unique_edge(cid, tid, "calls", "INFERRED", conf)
+
+        # ---- AST-callsite path: files a tree-sitter engine handed us real call sites
+        #      for (JS/TS today). Each call site is credited to the innermost function
+        #      node whose line span covers it -- an anonymous callback has no node of
+        #      its own, so a call inside one is correctly credited to the enclosing
+        #      named function/method. A call at module scope goes to the file's
+        #      entrypoint node when it has one, matching the regex path's whole-file
+        #      entrypoint span.
+        funcs_by_file = defaultdict(list)
+        for node in self.nodes:
+            if node["type"] in ("function", "entrypoint"):
+                funcs_by_file[node["path"]].append(node)
+
+        for rel, sites in self.ast_callsites.items():
+            fnodes = funcs_by_file.get(rel, [])
+            entry_node = next((n for n in fnodes if n["type"] == "entrypoint"), None)
+            span_funcs = [n for n in fnodes
+                          if n["type"] == "function" and n.get("line_start") and n.get("line_end")]
+            for cs in sites:
+                line = cs.get("line") or 0
+                enclosing = None
+                for n in span_funcs:
+                    if n["line_start"] <= line <= n["line_end"] and (
+                        enclosing is None
+                        or (n["line_end"] - n["line_start"]) < (enclosing["line_end"] - enclosing["line_start"])
+                    ):
+                        enclosing = n
+                caller = enclosing or entry_node
+                if caller is not None:
+                    resolve_one(caller, cs["name"], cs.get("recv"))
+
+        # ---- regex body-scan fallback: every function/entrypoint in a file the AST
+        #      path did not cover (Python, the regex languages, Go/Rust/Java/C/C++/PHP
+        #      for now, and any file where tree-sitter parsing failed).
         file_lines = {}
         for node in self.nodes:
             if node["type"] not in ("function", "entrypoint"):
                 continue
             rel = node["path"]
+            if rel in self.ast_callsites:
+                continue
             if rel not in file_lines:
                 fp = self.root / rel
                 try:
@@ -1988,84 +2149,8 @@ class GraphBuilder:
                 body_lines[marker_line - start] = ""
             body = "\n".join(body_lines)
 
-            called_names = set(re.findall(r"\b([A-Za-z_]\w*)\s*\(", body))
-            for name in called_names:
-                if name == node["name"] or len(name) < 2:
-                    continue
-                others = [tid for tid in candidates.get(name, ()) if tid != node["id"]]
-                if not others:
-                    continue
-
-                # v4.2 Phase 4, tier 1: exact same-file resolution. Language-agnostic,
-                # needs no import parsing at all -- if exactly one of the name-matched
-                # candidates is defined in this very file, a call to that name almost
-                # certainly means the local one, not a same-named symbol somewhere else
-                # in the project. This is new evidence the old tiers below never had
-                # (they only ever counted candidates project-wide), so it gets its own
-                # tag ("RESOLVED", not "INFERRED") and a confidence high enough to be
-                # treated as reliable by default, while still short of 1.0 since it's
-                # still a body-text regex scan, not real scope resolution (a shadowing
-                # nested definition, for instance, isn't modeled).
-                same_file = [tid for tid in others if self.get_node(tid)["path"] == rel]
-                if len(same_file) == 1:
-                    self._add_unique_edge(node["id"], same_file[0], "calls", "RESOLVED", 0.97,
-                                           {"resolved_by": "same_file"})
-                    continue
-
-                # v4.2 Phase 4, tier 2: filesystem-verified import resolution (see
-                # _resolve_import_targets). If the caller's file has an import that
-                # genuinely resolves, on disk, to exactly one of the name-matched
-                # candidates' own files, that's real evidence pointing at one specific
-                # candidate -- not a coincidence of stem, an actual resolved path. When
-                # it narrows to more than one (e.g. two resolved imports both happen to
-                # define a same-named symbol) the candidate set is still narrowed to
-                # those before falling through to the tier system below, which is
-                # already strictly better than leaving it at the full project-wide set.
-                resolved_files = file_resolved_imports.get(rel)
-                if resolved_files:
-                    import_matches = [tid for tid in others if self.get_node(tid)["path"] in resolved_files]
-                    if len(import_matches) == 1:
-                        self._add_unique_edge(node["id"], import_matches[0], "calls", "RESOLVED", 0.93,
-                                               {"resolved_by": "import"})
-                        continue
-                    if import_matches:
-                        others = import_matches
-
-                # Confidence reflects name ambiguity, not just "was this inferred":
-                # a name unique across the whole project (e.g. `chargeCard`) is a
-                # near-certain match; a name shared by many unrelated symbols (e.g.
-                # `close`, `get`, `__init__`) is little more than a coincidence, and
-                # scanning any real codebase turns up plenty of exactly that -- see
-                # references/query_protocol.md for how this should change how much
-                # weight a "calls" edge is given.
-                n = len(others)
-                if n == 1:
-                    base_conf = 0.85
-                elif n <= 3:
-                    base_conf = 0.55
-                elif n <= 8:
-                    base_conf = 0.35
-                else:
-                    base_conf = 0.2
-                caller_imports = file_import_segments.get(rel)
-                for tid in others:
-                    conf = base_conf
-                    # Import-proximity boost: if the caller's own file imports
-                    # something whose path looks like the candidate's file (matched
-                    # by filename stem, not full path -- imports are strings like
-                    # "../services/userService" or "myproject.auth.service", not
-                    # resolved file paths, and stem matching is the one check that
-                    # stays generic across languages without per-language import
-                    # resolution), nudge confidence up. This does not override the
-                    # tier above -- a very common name still only rises partway --
-                    # because the import proves the file relationship, not that this
-                    # specific call site meant this specific candidate.
-                    if caller_imports:
-                        cand = self.get_node(tid)
-                        stem = Path(cand["path"]).stem.lower() if cand else ""
-                        if stem and stem in caller_imports:
-                            conf = min(0.95, conf + 0.25)
-                    self._add_unique_edge(node["id"], tid, "calls", "INFERRED", conf)
+            for name in set(re.findall(r"\b([A-Za-z_]\w*)\s*\(", body)):
+                resolve_one(node, name, None)
 
     # -- community detection ---------------------------------------------------
     def detect_communities(self):
@@ -2304,7 +2389,17 @@ class GraphBuilder:
                 mtime = None
 
             cached = disk_cache.get(rel)
-            if incremental and cached and mtime is not None and abs(cached.get("mtime", -1) - mtime) < 1e-6:
+            # Force a one-time re-parse of an otherwise-fresh JS/TS file whose cache
+            # entry predates AST call-site capture (no "callsites" key), but only when
+            # the tree-sitter engine that would produce them is actually importable --
+            # otherwise this would re-parse the file on every incremental build forever.
+            _ext = fp.suffix.lower()
+            _ts_key = 'tsx' if _ext == '.tsx' else EXT_MAP.get(_ext)
+            stale_schema = (cached is not None
+                            and EXT_MAP.get(_ext) in CALLSITE_TS_LANGS
+                            and _ts_key in TREE_SITTER_LANGS
+                            and "callsites" not in cached)
+            if incremental and cached and not stale_schema and mtime is not None and abs(cached.get("mtime", -1) - mtime) < 1e-6:
                 new_cache[rel] = cached
                 reused += 1
                 continue

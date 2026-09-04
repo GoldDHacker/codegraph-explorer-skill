@@ -105,11 +105,22 @@ Notes:
   `imports`/`references`/`depends_on`/`tests`/`documents` edge type today — an import
   shows up as an `import`-typed *node* reached by a `contains` edge from its file, not
   as its own edge type. Don't query for edge types this script doesn't emit.
-- `confidence` on `calls` edges is not a fixed 0.7. Since v4.2, each call site is
-  checked against two resolution tiers before falling back to the pre-v4.2 heuristic:
+- `calls` **call sites** come from two places: real tree-sitter `call_expression` /
+  `new_expression` nodes for JS/TS (structural — control-flow keywords, comments and
+  string literals never register; `a.b.foo()` keeps its receiver `a.b`; a call in an
+  anonymous callback is credited to the enclosing named function), and a `\bname(` scan
+  of the function body's text for every other language and any file tree-sitter can't
+  parse.
+- `confidence` on `calls` edges is not a fixed 0.7. Each call site is checked against
+  the resolution tiers below before falling back to the pre-v4.2 heuristic:
+  0. **Same-class via receiver** (`tag: "RESOLVED"`, `confidence: 0.97`,
+     `metadata.resolved_by: "this_method"`, JS/TS only): the call is `this.m()` /
+     `self.m()` inside a method and exactly one method named `m` on the caller's own
+     class exists in the file.
   1. **Same-file** (`tag: "RESOLVED"`, `confidence: 0.97`, `metadata.resolved_by:
      "same_file"`): exactly one same-named candidate is defined in the caller's own
-     file. Works for every language, no import parsing needed.
+     file. Works for every language, no import parsing needed. A bare `name(...)` call
+     (no receiver) drops class methods from this count when a free function also matches.
   2. **Filesystem-verified import** (`tag: "RESOLVED"`, `confidence: 0.93`,
      `metadata.resolved_by: "import"`): the caller's import resolves, via real
      filesystem lookup (not filename-stem similarity), to exactly one same-named

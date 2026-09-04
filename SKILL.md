@@ -346,6 +346,29 @@ optional dependency actually being installed):
 
 ## What changed after v4.4 (v5 work in progress)
 
+- **`calls` resolution for JS/TS is AST-driven, not a text scan.** The tree-sitter
+  JS/TS walk now emits a real call site (`{name, recv, line}`) for every
+  `call_expression` / `new_expression`, and `resolve_references()` attributes each to
+  the innermost function node whose span covers it before running the same
+  same-class / same-file / import / ambiguity tiers. Consequences: `if (` / `while (`
+  / `switch (` / `catch (` / a parenthesised group are structurally not calls and
+  never register; a `name(` inside a comment or string is invisible; `a.b.foo()` is
+  captured with its receiver; a call inside an anonymous callback is credited to the
+  enclosing named function; and `this.m()` / `self.m()` inside a method resolves to a
+  same-class method (`resolved_by: "this_method"`, confidence 0.97). Measured on
+  `sindresorhus/got` (~25 files): +~30 real private-method edges (`#a() → #b()`, which
+  `\bname(` can't match because `#` breaks the word boundary), ~115 method calls moved
+  from a vague `same_file` match to a precise `this_method` one, ~9 comment/string
+  false positives dropped. Every other language (Python, the regex languages, and the
+  not-yet-converted tree-sitter languages Go/Rust/Java/C/C++/PHP) keeps the `\bname(`
+  body scan unchanged; a file whose tree-sitter parse fails falls back to it too. One
+  incremental build re-parses already-cached JS/TS files once to pick up call sites;
+  a full `/graph build` covers them all at once.
+- **tree-sitter is pinned to `>=0.23,<0.25`.** `tree-sitter` 0.26 segfaults (native
+  access violation) partway through parsing a real TS tree with the current grammar
+  wheels; 0.23.x is the last line this code was verified against. `pip install` lines
+  below carry the constraint.
+
 - **`graph.html` is genuinely offline again.** Between v3.4 and v4.4 the renderer
   regressed to loading D3 from `https://d3js.org/d3.v7.min.js` — a network dependency
   that blanks the page the moment it's opened without connectivity, directly

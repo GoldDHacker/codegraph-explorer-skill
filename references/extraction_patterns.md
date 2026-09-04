@@ -63,6 +63,18 @@ enclosing-class and module-scope state):
 - `import_statement` → `import` node (`metadata.style: "import"`).
 - `call_expression` where the callee is the identifier `require` → `import` node
   (`metadata.style: "require"`), same as the regex engine's `require()` handling.
+- **Every `call_expression` and `new_expression` → a call site** `{name, recv, line}`
+  fed to `resolve_references()` (the v5 line, JS/TS only for now — see CALLSITE_TS_LANGS).
+  `foo(...)` → `name "foo"`, `recv None`; `a.b.foo(...)` → `name "foo"`, `recv "a.b"`;
+  `new Foo(...)` → `name "Foo"`. A chained/computed callee (`f()()`, `arr[k]()`, a
+  tagged template) can't be named against the symbol table and is skipped. Because
+  these are real syntax nodes, `if (`/`while (`/`switch (`/`catch (`/a parenthesised
+  group never register as calls, and a `name(` written in a comment or string literal
+  is invisible — both of which the regex body-scan gets wrong. Each call site is then
+  attributed to the innermost `function` node whose line span covers it, so a call
+  inside an anonymous callback is credited to the enclosing named function/method, and
+  `this.m()` can resolve to a same-class method (`resolved_by: "this_method"`). See
+  `query_protocol.md`.
 - A signature/annotation gotcha worth knowing if extending this: a method/function
   node's own span can start on a preceding decorator/annotation line (`@Component()` in
   Angular/NestJS-style TS); reading the node's own first line for `metadata.signature`
@@ -86,12 +98,16 @@ enclosing-class and module-scope state):
 - `import_declaration` → `import` node, including wildcard (`import foo.bar.*;`)
   imports.
 
-Both language paths still update the same `symtab` the regex engine uses, so `calls`
-resolution, community detection, `god_nodes`, entrypoint detection, and every query
-command (`--callers`/`--find-path`/`--trace-entrypoints`/`--impact`) work identically
-regardless of which extraction engine produced a given node — including, now, `calls`
-edges whose call site is *inside* a class method body, which the regex engine could
-never see because it never had a method-body node to scope that search to.
+Both language paths still update the same `symtab` the regex engine uses, so community
+detection, `god_nodes`, entrypoint detection, and every query command
+(`--callers`/`--find-path`/`--trace-entrypoints`/`--impact`) work identically regardless
+of which extraction engine produced a given node. For `calls` edges specifically, JS/TS
+now goes through the AST call-site path above rather than the regex body-scan — measured
+on a real TS codebase (`sindresorhus/got`, ~25 files) it recovered ~30 genuine
+private-method call edges (`#a() → #b()`, invisible to `\bname(` since `#` breaks the
+word boundary), reclassified ~115 method calls from a vague `same_file` match to a
+precise `this_method` one, and dropped ~9 false edges that the regex scan had matched
+inside comments.
 
 ## Go — tree-sitter (v4.2, optional)
 
@@ -260,7 +276,9 @@ e.g. a `@app.route(...)` decorator's argument.
 
 ## JavaScript / TypeScript (regex, unanchored, fallback only)
 This is the fallback path used when tree-sitter (see above) isn't installed for
-JS/TS/TSX, or a specific file fails to parse.
+JS/TS/TSX, or a specific file fails to parse. On this path there are no AST call sites,
+so `calls` edges come from the same `\bname(` body scan every non-tree-sitter language
+uses — no receivers, no `this.m()` resolution, and ES private methods (`#m()`) invisible.
 - Functions: `\b(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s*\*?\s*(\w+)`
 - Classes: `\b(?:export\s+)?(?:default\s+)?class\s+(\w+)`
 - Imports: `\bimport\s+.*?from\s+["']([^"']+)["']`

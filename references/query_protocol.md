@@ -67,18 +67,34 @@ dans le processus Python et n'impriment que le résultat.
 
 ### Pondération par confiance (edges `calls`)
 
-Un edge `calls` est fondamentalement une heuristique par nom, pas une résolution de
-portée réelle : le script cherche, dans le corps de chaque fonction, les identifiants
-suivis de `(` qui correspondent au nom d'un autre symbole. Deux fonctions sans rapport
-portant le même nom dans deux fichiers différents peuvent donc se retrouver reliées à
-tort. Depuis v4.2, deux niveaux de résolution existent, dans cet ordre de priorité pour
-chaque appel :
+Un edge `calls` reste au fond une résolution **par nom**, pas une résolution de portée
+avec système de types : deux symboles sans rapport portant le même nom peuvent se
+retrouver reliés à tort. Ce qui varie, c'est d'où vient la liste des appels d'une
+fonction :
+- **JS/TS** (moteur tree-sitter installé) : les vrais nœuds `call_expression` /
+  `new_expression` de l'arbre de syntaxe. `if (`, `while (`, `switch (`, `catch (`, un
+  simple groupe parenthésé — rien de tout ça n'est un `call_expression`, donc plus
+  jamais compté comme un appel ; et `a.b.foo()` est capturé avec son récepteur `a.b`.
+  Un appel dans un callback anonyme est attribué à la fonction/méthode nommée qui
+  l'englobe.
+- **Tous les autres langages** (Python, langages regex, Go/Rust/Java/C/C++/PHP, ou
+  fichier que tree-sitter n'a pas pu parser) : un scan `\bnom(` du corps de la fonction
+  — l'ancien comportement, qui peut encore matcher un `nom(` en commentaire ou en
+  chaîne, et ne voit pas les récepteurs ni les méthodes privées ES `#nom()`.
+
+Dans les deux cas, la résolution qui suit passe par les mêmes niveaux, dans cet ordre :
 
 **1. `tag: "RESOLVED"`** — le script a une preuve concrète, pas seulement un décompte de
 candidats, que l'appel vise un symbole précis :
+- `metadata.resolved_by: "this_method"` (confidence `0.97`, JS/TS uniquement) :
+  l'appel est `this.m(...)` / `self.m(...)` dans une méthode, et exactement une méthode
+  du même nom de **la classe de l'appelant** existe dans le fichier. C'est le seul cas
+  où un jeton récepteur donne une vraie information de portée.
 - `metadata.resolved_by: "same_file"` (confidence `0.97`) : un seul des candidats
   portant ce nom est défini **dans le même fichier** que l'appelant — n'importe quel
-  langage, aucune analyse d'import nécessaire.
+  langage, aucune analyse d'import nécessaire. Un appel nu `nom(...)` (sans récepteur)
+  écarte les méthodes de classe du décompte quand une fonction libre du nom existe
+  aussi dans le fichier.
 - `metadata.resolved_by: "import"` (confidence `0.93`) : l'import de l'appelant se
   résout, sur le vrai système de fichiers (pas par ressemblance de nom), vers exactement
   un des fichiers candidats. Portée à ce jour : imports relatifs JS/TS/JSX/TSX (`./foo`,
@@ -88,11 +104,11 @@ candidats, que l'appel vise un symbole précis :
   d'outillage — `go.mod`, un classpath, `composer.json`, un chemin d'include — que le
   script ne parse pas) ; ils restent sur le signal plus faible ci-dessous.
 
-Ni l'un ni l'autre n'atteint `1.0` : c'est toujours un scan texte du corps de la
-fonction, pas une vraie résolution de portée (une définition imbriquée qui masquerait
-le symbole global, par exemple, n'est pas modélisée). Mais un edge `RESOLVED` peut être
-présenté avec un niveau de confiance nettement supérieur à un edge `INFERRED` — c'est
-la différence entre une preuve et une coïncidence de nom.
+Aucun n'atteint `1.0` : même sur l'arbre de syntaxe JS/TS, la résolution reste un
+appariement de noms et un test de chemin, pas une vraie résolution de portée (un nom
+masqué par une définition imbriquée, par exemple, n'est pas modélisé). Mais un edge
+`RESOLVED` peut être présenté avec un niveau de confiance nettement supérieur à un edge
+`INFERRED` — c'est la différence entre une preuve et une coïncidence de nom.
 
 **2. `tag: "INFERRED"`** — aucune des deux résolutions ci-dessus n'a permis de trancher
 (ou en langage sans résolution d'import vérifiée) ; le champ `confidence` reflète alors

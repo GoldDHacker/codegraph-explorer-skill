@@ -38,6 +38,7 @@ Skill pour Claude Code, inspiré de **Graphify** et **Understand Anything**.
 | Aucun moyen de savoir ce qu'un build a changé, ni de comparer l'état du graphe à un point de référence choisi | `--diff [nom]` + `--snapshot <nom>` (v4.4) : `--diff` sans nom compare au build précédent (rotation automatique, zéro préparation) ; `--snapshot`/`--diff <nom>` compare à un point nommé explicitement, qui survit à autant de builds qu'on veut. Limite documentée : un symbole qui n'a fait que *bouger* (id de nœud incluant son numéro de ligne) apparaît en `removed`+`added`, jamais en `changed` |
 | Le scanner de secrets ne couvrait que 3 formes (mot-clé=valeur, clé AWS, bearer token) | Redaction élargie (v4.4) : préfixes GitHub/GitLab/Slack/Stripe/npm documentés, webhooks Slack, marqueurs de clé privée PEM, JWT (préfixe `eyJ` quasi certain), et un détecteur générique par entropie de Shannon pour un secret sans mot-clé ni préfixe reconnu — calibré empiriquement contre des valeurs réalistes non sensibles (hash sha256, UUID, identifiant camelCase, chaîne de version) pour éviter les faux positifs plutôt que de deviner un seuil |
 | Entre v3.4 et v4.4, `graph.html` avait régressé en rechargeant D3 depuis `https://d3js.org` — page blanche à l'ouverture hors-ligne, alors que le `SKILL.md` continuait de le qualifier de « self-contained » | Renderer sans dépendance restauré (post-v4.4) : petite simulation de forces vélocité-Verlet faite main, SVG à la main, pan/zoom/glisser/recherche/légende en vanilla, aucun `<script src>`, aucun CDN. Récupère aussi le focus sur les voisins que la version D3 avait perdu. Vérifié avec `window.d3 === undefined` et zéro erreur console |
+| Les edges `calls` JS/TS venaient d'un scan `\bnom(` du texte du corps : `if (`/`while (`/`catch (` comptés comme des appels, `nom(` en commentaire aussi, méthodes privées ES `#m()` jamais vues, récepteur (`this`, `db`, …) ignoré | Résolution `calls` par AST tree-sitter (post-v4.4, JS/TS) : chaque `call_expression`/`new_expression` réel devient un call site `{name, recv, line}` attribué à la fonction englobante ; `this.m()` se résout vers une méthode de la classe de l'appelant (`resolved_by: "this_method"`, 0.97). Mesuré sur `sindresorhus/got` : +~30 edges de méthodes privées réels, ~115 appels passés d'un `same_file` vague à un `this_method` précis, ~9 faux positifs en commentaire supprimés. Les autres langages gardent le scan de corps inchangé |
 
 Le détail complet des bugs trouvés et corrigés est dans `SKILL.md` (§ "What changed in v3" … "What changed after v4.4").
 
@@ -148,11 +149,14 @@ Le script `codegraph_builder.py` est :
 
 ```bash
 pip install watchdog                                                          # mode watch réactif
-pip install tree-sitter tree-sitter-javascript tree-sitter-typescript tree-sitter-java  # méthodes JS/TS/Java
+pip install "tree-sitter>=0.23,<0.25" tree-sitter-javascript tree-sitter-typescript tree-sitter-java  # méthodes + calls AST JS/TS/Java
 pip install tree-sitter-go tree-sitter-rust tree-sitter-c tree-sitter-cpp tree-sitter-php  # méthodes Go/Rust/C/C++/PHP (v4.2)
 pip install ladybug                                                           # --sync-graphdb / --cypher
 pip install python-igraph leidenalg                                          # --community-algo leiden (v4.4, wheels précompilées)
 ```
+> `tree-sitter` **0.26 segfault** en cours de parsing d'un vrai arbre TS avec les
+> grammaires actuelles ; d'où la borne `<0.25`. La 0.23.x est la dernière ligne contre
+> laquelle ce code a été vérifié.
 Chacune est évaluée indépendamment à l'import : l'absence d'une seule (ou de plusieurs)
 ne désactive jamais le reste du script — voir `SKILL.md` § "What changed in v4.0" pour
 le détail du fallback par langage/commande.
@@ -192,13 +196,17 @@ python codegraph_builder.py /chemin/vers/projet --cypher "MATCH (n:Symbol) RETUR
 
 ## Limites connues (honnêtement documentées, pas cachées)
 
-- Les edges `calls` restent fondamentalement une heuristique par nom, pas une vraie
-  résolution de portée/type : deux fonctions sans rapport portant le même nom dans des
-  fichiers différents peuvent en théorie se retrouver reliées. Depuis v4.3, deux tiers
-  de résolution réelle passent devant cette heuristique quand ils s'appliquent — même
-  fichier (`tag: RESOLVED`, `confidence: 0.97`, tous langages) et import résolu sur le
-  vrai système de fichiers (`tag: RESOLVED`, `confidence: 0.93`, JS/TS relatifs et
-  chemins Python en pointillés seulement — voir `references/query_protocol.md`).
+- Les edges `calls` restent fondamentalement une résolution par nom, pas une vraie
+  résolution de portée/type : deux symboles sans rapport portant le même nom peuvent en
+  théorie se retrouver reliés. La *liste* des appels d'une fonction vient d'un vrai AST
+  pour JS/TS (nœuds `call_expression`/`new_expression` — plus de faux `if (`/`while (`,
+  plus de `nom(` en commentaire, méthodes privées `#m()` visibles, récepteur capturé)
+  et d'un scan `\bnom(` du texte du corps partout ailleurs. Côté résolution, trois
+  tiers `RESOLVED` passent devant l'heuristique quand ils s'appliquent — `this.m()`
+  vers une méthode de la classe de l'appelant (`resolved_by: "this_method"`, `0.97`,
+  JS/TS), même fichier (`resolved_by: "same_file"`, `0.97`, tous langages), et import
+  résolu sur le vrai système de fichiers (`resolved_by: "import"`, `0.93`, JS/TS
+  relatifs et chemins Python en pointillés seulement — voir `references/query_protocol.md`).
   Ailleurs (Go/Rust/Java/PHP/C/C++, ou tout import que la résolution ne parvient pas à
   faire correspondre), le champ `confidence` d'un edge `tag: INFERRED` reflète le
   nombre de candidats homonymes restants (0.85 si unique dans l'ensemble considéré,
@@ -321,7 +329,11 @@ compris la limite documentée du symbole déplacé verrouillée comme régressio
 non-régressions sur des valeurs bénignes réalistes (extension de `TestRedact` dans
 `tests/test_unit_helpers.py`), et — post-v4.4 — le fait que `graph.html` reste sans
 dépendance externe (`tests/test_html_offline.py` : aucun `<script src>`, aucun CDN,
-aucun appel D3, verrouillé comme régression). Les tests qui dépendent de `tree-sitter`/`ladybug`/
+aucun appel D3, verrouillé comme régression) et la résolution `calls` par AST JS/TS
+(`tests/test_calls_ast.py` : `if (`/`while (`/`catch (` jamais comptés comme appels,
+`this.m()` → méthode de la même classe, appel dans un callback crédité à la méthode
+englobante, appel nu préférant la fonction libre, `new X()` → classe, import résolu).
+Les tests qui dépendent de `tree-sitter`/`ladybug`/
 `python-igraph`+`leidenalg` se sautent proprement (`pytest.skip`) si le paquet
 correspondant n'est pas installé, plutôt que d'échouer.
 

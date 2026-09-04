@@ -2,3 +2,10 @@
 # codegraph_builder.py itself -- see scripts/codegraph_builder.py's own optional-
 # dependency notes (tree-sitter/ladybug/watchdog) for that.
 pytest>=7
+
+# Optional: installing these lets the tree-sitter test files actually run instead of
+# skipping. tree-sitter is capped at <0.25 -- 0.26 segfaults mid-parse on a real TS
+# tree with the current grammar wheels.
+tree-sitter>=0.23,<0.25
+tree-sitter-javascript
+tree-sitter-typescript
