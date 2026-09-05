@@ -1,8 +1,13 @@
+# Normalize the whole repo to LF, in the stored blobs and on checkout. The skill runs
+# on Linux/macOS/Windows and is distributed as a zip built with `git archive`; a CRLF
+# file in that zip (or a CRLF checkout) is at best ugly and at worst trips a parser
+# (the SKILL.md YAML frontmatter loader, notably).
+* text=auto eol=lf
+
 # Keep GitHub's language stats meaningful: the skill is the Python script + its docs.
 docs/graph-preview.svg linguist-generated
 *.md                   linguist-documentation
 
-# The skill loader parses SKILL.md's YAML frontmatter; keep it LF so a CRLF checkout
-# on Windows can't confuse the parser. The Python script and its own newlines don't care.
-SKILL.md               text eol=lf
-scripts/codegraph_builder.py text eol=lf
+# Binary assets: never touch.
+*.png binary
+*.zip binary
