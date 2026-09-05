@@ -1,13 +1,22 @@
-# Auto-Build Protocol — Script-First Edition (v4.6)
+# Auto-Build Protocol — Script-First Edition (v4.7)
 
 ## Principe
 Le graphe est construit par un **script local**, pas par Claude. Claude est
 l'orchestrateur, le script est le worker.
 
+Le graphe n'est pas seulement pour *répondre à une question d'architecture* : c'est
+l'outil de cartographie par défaut **dès que Claude travaille sur du code dans un repo
+établi** — implémenter, corriger, refactorer, reviewer. La phase d'exploration passe par
+le graphe avant `grep`. Le hook `scripts/codegraph_session_hook.py`
+(voir `hook_setup.md`) rend cette construction automatique au démarrage de session ; sans
+lui, la Règle 1 dit toujours de construire au premier contact, mais ça dépend de Claude.
+
 ## Règles d'activation
 
-### Règle 1 : First Encounter → Run
-**Quand** : Claude ouvre un répertoire contenant du code.
+### Règle 1 : Premier contact → Run
+**Quand** : Claude commence **toute tâche qui touche un repo établi** — une question sur
+le code, *ou* implémenter / corriger / refactorer / reviewer du code dedans. Pas
+seulement sur une question d'architecture explicite.
 **Action** :
 1. Vérifier `.codegraph/graph.json`. Si présent et frais (voir Règle 3) → skip.
 2. Si absent → exécuter `python codegraph_builder.py <racine_du_projet>` (script complet
@@ -34,8 +43,20 @@ l'orchestrateur, le script est le worker.
    loadable`, lancer `python codegraph_builder.py --doctor` et relayer la ligne `pip`
    qu'il propose à l'utilisateur — sinon, rien à faire ni à vérifier ici.
 
+### Règle 1 bis : Requête graphe **avant** `grep`
+**Quand** : Claude s'apprête à utiliser `grep`/`glob`/lecture de fichiers pour une
+question **relationnelle** sur le code — qui appelle/hérite d'un symbole, ce qui en
+dépend, comment deux parties se connectent, où commence l'exécution, ce qu'un changement
+casserait, quels tests re-run.
+**Action** : s'arrêter et lancer la commande `/graph` correspondante (Règle 2) à la
+place. Le graphe est complet là où `grep` ne l'est pas (il suit les appels indirects,
+les re-exports, l'héritage) et il donne la vue *impact* que `grep` ne donne jamais.
+`grep`/`glob`/lecture restent pour ce que le graphe n'est **pas** : ouvrir un fichier
+précis déjà identifié, ou chercher une chaîne littérale, une valeur de config, un
+message d'erreur, un commentaire.
+
 ### Règle 2 : Query → Jamais le JSON en entier
-**Quand** : L'utilisateur pose une question sur le code.
+**Quand** : L'utilisateur pose une question sur le code, ou la Règle 1 bis renvoie ici.
 **Action** :
 1. Vérifier `.codegraph/graph.json`.
 2. Si absent → appliquer Règle 1.
@@ -138,6 +159,10 @@ contrat que la Règle 5).
 - ❌ Claude utilise regex dans son raisonnement pour parser du code
 - ❌ Claude demande à l'utilisateur s'il veut construire le graphe
 - ❌ Claude lit 20 fichiers pour répondre à "comment fonctionne X ?"
+- ❌ Claude `grep` pour trouver les appelants / dépendants / un chemin / les tests
+  impactés d'un symbole au lieu d'une requête `/graph` (Règle 1 bis)
+- ❌ Claude commence à implémenter/refactorer dans un repo établi sans construire ni
+  requêter le graphe d'abord
 - ❌ Claude présente un edge `calls` à faible `confidence` comme un fait établi sans le
   signaler (voir `query_protocol.md`)
 - ❌ Claude essaie de détecter un cycle ou un point de coupure à l'œil en lisant une

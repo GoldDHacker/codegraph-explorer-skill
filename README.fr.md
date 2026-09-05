@@ -1,4 +1,4 @@
-# 🧠 CodeGraph Explorer — Script-First (v4.6)
+# 🧠 CodeGraph Explorer — Script-First (v4.7)
 
 *[🇬🇧 English](README.md) · 🇫🇷 Français*
 
@@ -52,8 +52,9 @@ Skill pour Claude Code, inspiré de **Graphify** et **Understand Anything**.
 | « Quel fichier dépend de quel fichier ? » obligeait à parcourir des milliers de nœuds `function` | Edges `file → file` agrégés (v4.5, #C) : les edges `calls`/`inherits` sont repliés en une arête pondérée par paire (fichier source → fichier cible), stockées à part dans `graph.json["file_deps"]` (pas mélangées aux `edges`). Commande `--file-deps [FICHIER|SYMBOLE]` — dépendances entrantes/sortantes d'un fichier, ou la liste complète triée par poids. Lookup sur ~quelques centaines d'entrées, instantané |
 | Une grammaire installée mais d'ABI incompatible avec le cœur tree-sitter (`ValueError: Incompatible Language version 15`) faisait soit planter tout le script à l'import, soit basculer ce langage en regex sans rien dire — « moins précis que documenté » de façon invisible | Chargement robuste des grammaires (v4.6) : une boucle attrape toute erreur de chargement, teste par un parse d'un octet, enregistre l'échec dans `TREE_SITTER_LOAD_ERRORS`, et continue en regex pour ce langage. Chaque build affiche une ligne `[!]` nommant les langages touchés ; nouveau flag `--doctor` qui imprime l'état complet du moteur + la ligne `pip` vérifiée. Cœur borné `>=0.25,<0.26` — la seule ligne qui charge les grammaires ABI-15 actuelles *et* ne segfault pas (0.26.0 si) |
 | `--explain`/`--callers`/`--impact` sont *la réponse* à une question qui se réduit à une chose précalculée — mais « mon auth est-elle bien isolée ? », « pourquoi cette archi tient ? », « quelle est la forme de ce cluster ? » ne se réduisent à aucun flag ; Claude ne pouvait que lire les sources ou deviner | Sous-graphe de raisonnement (v4.6, « Phase 6 ») : `--subgraph SYMBOLE --depth N --json` renvoie un voisinage borné (nœuds + edges `calls`/`inherits`, plafonné à 60 nœuds, `"truncated": true` si atteint) comme matière brute pour que Claude raisonne dessus. Les propriétés structurelles **exactes** — points de coupure (Tarjan), `components_if_focus_removed`, cycles passant par le focus — sont calculées par le script et livrées en champs, jamais laissées à l'œil d'un LLM sur une liste d'arêtes. Edges `calls` faibles filtrés par un défaut `--min-confidence` (0.5), pas une consigne en prose. Mesuré ~38 Ko de JSON sur une requête hub réelle de 807 nœuds — nettement plus cher qu'un `--callers`, d'où une règle de routage (`pourquoi/comment → subgraph`, `qui/combien/quel chemin → les commandes existantes`) |
+| Le skill était écrit comme « répondre aux *questions* d'archi depuis le graphe », donc il ne se déclenchait que sur une question. Quand on demandait à Claude d'*implémenter* ou *corriger* quelque chose, il explorait à l'ancienne — des dizaines d'allers-retours grep/glob/lecture de fichiers — sans jamais engager le graphe | Déclencheur élargi + un hook (v4.7). La `description` de `SKILL.md`, la Règle 1 et une nouvelle **Règle 1 bis** disent désormais : construire/rafraîchir le graphe **au début de toute tâche de code** dans un repo établi, et requêter le graphe **avant** `grep` pour tout ce qui est relationnel (appelants, dépendants, chemins, entry points, tests impactés). Nouveau `scripts/codegraph_session_hook.py` : se câble en hook `SessionStart` de Claude Code (ou en hook git `post-checkout`) et construit un graphe absent, ou `--update` un graphe périmé, dans un **processus détaché en arrière-plan** qui ne bloque jamais la session — donc `.codegraph/graph.json` est déjà là. Opt-out : `CODEGRAPH_AUTOBUILD=0`. Setup : `references/hook_setup.md`. 8 nouveaux tests (`tests/test_session_hook.py`) |
 
-Le détail complet des bugs trouvés et corrigés est dans `SKILL.md` (§ "What changed in v3" … "What changed in v4.6").
+Le détail complet des bugs trouvés et corrigés est dans `SKILL.md` (§ "What changed in v3" … "What changed in v4.7").
 
 ## 🚀 Installation
 
@@ -62,13 +63,26 @@ unzip codegraph-explorer-skill.zip -d ~/.claude/skills/codegraph
 # Redémarre Claude Code
 ```
 
+**Optionnel mais recommandé** — câble le hook d'auto-build pour que le graphe soit prêt
+avant même de poser une question (`references/hook_setup.md`) :
+
+```jsonc
+// ~/.claude/settings.json
+{ "hooks": { "SessionStart": [ { "hooks": [ { "type": "command",
+  "command": "python3 \"$HOME/.claude/skills/codegraph/scripts/codegraph_session_hook.py\"" } ] } ] } }
+```
+
 ## ✨ Comportement proactif & token-free
 
-### Premier contact
-Claude détecte un projet → exécute `codegraph_builder.py` → lit le JSON.
+### Début de toute tâche de code (pas seulement les questions)
+Claude est dans un projet → le graphe est construit ou rafraîchi (le hook `SessionStart`
+le fait pour toi), puis Claude **requête le graphe avant de dégainer `grep`** — pour les
+appelants, dépendants, chemins, entry points, tests impactés. `grep` et la lecture de
+fichiers restent pour un fichier précis déjà identifié ou une chaîne/config/commentaire
+littéral.
 
 ```
-Graph built. 1247 nodes, 3892 edges.
+codegraph: graph ready (1247 nodes, 3892 edges)
 ```
 
 ### Questions architecture
@@ -129,12 +143,14 @@ codegraph/
 ├── README.fr.md                     ← ce fichier
 ├── docs/graph-preview.png|.svg      ← l'illustration ci-dessus
 ├── scripts/
-│   └── codegraph_builder.py         ← Script local (stdlib only, watchdog/tree-sitter/ladybug optionnels)
+│   ├── codegraph_builder.py         ← Script local (stdlib only, watchdog/tree-sitter/ladybug optionnels)
+│   └── codegraph_session_hook.py    ← Hook d'auto-build SessionStart (stdlib only) — v4.7
 ├── references/
 │   ├── graph_schema.md              ← Schéma JSON + schéma graph_db/ (Ladybug/Cypher)
 │   ├── extraction_patterns.md       ← Patterns par langage (+ tree-sitter JS/TS/Java/Go/Rust/C/C++/PHP) + limites connues
 │   ├── query_protocol.md            ← Protocole de requête JSON (avec pondération par confiance)
-│   └── auto_build_protocol.md       ← Règles d'activation
+│   ├── auto_build_protocol.md       ← Règles d'activation (build au premier contact, requête avant grep)
+│   └── hook_setup.md                ← Câblage du hook d'auto-build — v4.7
 ├── templates/
 │   └── graph_report.md              ← Template du rapport (réellement utilisé par le script)
 └── tests/                           ← Suite pytest (dev-only, voir § Tests plus bas)
@@ -374,9 +390,15 @@ nommée avec le correctif) et le calcul points de coupure / cycles de `--subgrap
 (`tests/test_subgraph.py` : un fixture cycle+pendant vérifié à la main où retirer le
 focus scinde bien le voisinage en 2 composantes, la limite de profondeur, le filtrage
 par confidence par défaut mesuré sur un vrai appel ambigu à 0.35 plutôt que supposé, et
-le plafond de nœuds avec troncature signalée). Les tests qui dépendent de
+le plafond de nœuds avec troncature signalée) ; et — v4.7 — le hook d'auto-build
+`SessionStart` (`tests/test_session_hook.py` : opt-out, un répertoire sans code laissé
+tranquille, un graphe absent déclenchant un build en arrière-plan, un graphe périmé
+rafraîchi, un graphe frais qui se contente d'afficher ses compteurs, un lock vivant qui
+bloque un second spawn, le worker d'arrière-plan qui lance le builder puis relâche le
+lock). Les tests qui dépendent de
 `tree-sitter`/`ladybug`/`python-igraph`+`leidenalg` se sautent proprement (`pytest.skip`)
-si le paquet correspondant n'est pas installé, plutôt que d'échouer.
+si le paquet correspondant n'est pas installé, plutôt que d'échouer. 150 passent, ~11
+sautés selon les dépendances optionnelles.
 
 ## License
 

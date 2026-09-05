@@ -1,6 +1,6 @@
 ---
 name: codegraph
-description: Turn any codebase into a queryable knowledge graph so architecture and dependency questions are answered from the graph instead of by re-reading source files. A local, dependency-free Python script parses the project once into .codegraph/graph.json; Claude then queries it with small commands (--explain, --callers, --find-path, --trace-entrypoints, --impact, --file-deps) or reads GRAPH_REPORT.md, and never loads the whole JSON or opens source files just to reason about structure. Use this whenever the user asks how a codebase is organized, what calls or subclasses a symbol, what depends on it, what would break if they change it, how two parts of the system connect, where the entry points are, which tests to re-run after a change, or which files depend on which — and any time you would otherwise open many files just to map out how the code fits together. Also triggers on "/graph" and "/codegraph".
+description: Turn any codebase into a queryable knowledge graph so structure and dependency questions are answered from the graph, not by re-reading source. A local, dependency-free Python script parses the project once into .codegraph/graph.json; Claude then runs small query commands (--explain, --callers, --find-path, --trace-entrypoints, --impact, --file-deps) or reads GRAPH_REPORT.md, never loading the whole JSON or opening source to reason about structure. Engage it at the START of any task in a codebase — implementing, fixing, refactoring, reviewing, or asking how it is organized, what calls or subclasses a symbol, what depends on it, what a change would break, how two parts connect, where entry points are, which tests to re-run, which files depend on which. Build or refresh the graph first, then query it INSTEAD OF grep/glob/opening files for anything relational. Any time you would otherwise open several files to see how code fits together, that is this skill. Also triggers on /graph and /codegraph.
 license: MIT
 ---
 
@@ -26,9 +26,15 @@ Claude NEVER: reads raw source files to build the graph, uses regex in reasoning
 
 ## Invocation
 The skill is `codegraph` — it auto-triggers on the architecture/dependency questions in
-the description above, or the user can call `/codegraph`. Its own commands are written
+the description above, **and at the start of any task that touches an established
+codebase** (see Rule 1), or the user can call `/codegraph`. Its own commands are written
 `/graph <command> [args]` throughout this file (e.g. `/graph build`, `/graph explain
 UserService`) — that's the skill's command vocabulary, map it to the flags shown.
+
+For the build to be reliably *already done* when a session starts, wire
+`scripts/codegraph_session_hook.py` as a `SessionStart` hook — see
+[`references/hook_setup.md`](references/hook_setup.md). It is optional; without it,
+Rule 1 still says to build on first contact, it just depends on Claude remembering to.
 
 ## What changed in v3
 
@@ -489,17 +495,60 @@ rather than adopted wholesale, then implemented and measured like every prior ph
   ambiguous call — rather than an assumed one), the node-cap truncation flag, and
   JSON-shape/edge-case coverage (no match, ambiguous symbol, an isolated node).
 
+## What changed in v4.7
+
+Two changes, both aimed at the same gap: the skill was written as "answer architecture
+*questions* from the graph", and in practice it only fired when someone asked one. When
+Claude was told to *implement* or *fix* something, it explored the repo the old way —
+dozens of `grep`/`glob`/file-read round trips — and never engaged the graph at all.
+
+### The trigger is now "working on code", not "being asked about it"
+
+Rule 1 and the frontmatter `description` now say explicitly: the graph is built or
+refreshed at the **start of any task in an established codebase** — implementing,
+fixing, refactoring, reviewing — and a new **Rule 1 bis** says to reach for a `/graph`
+query *before* `grep`/`glob`/opening files whenever the question is relational (who calls
+this, what depends on it, how do A and B connect, where does execution start, which
+tests does this change touch). `grep` and file reads stay for what the graph is not: a
+specific known file, or a literal string / config value / comment.
+
+### A hook so the graph is already there
+
+`scripts/codegraph_session_hook.py` (new, stdlib-only) wires as a Claude Code
+`SessionStart` hook (or a git `post-checkout`/`post-merge` hook, or runs by hand). On a
+session start it builds `.codegraph/graph.json` if missing, or `--update`s it if older
+than `CODEGRAPH_AUTOBUILD_MAX_AGE` (default 1800 s), always in a **detached background
+process** — it prints one line and never blocks the session. Opt out with
+`CODEGRAPH_AUTOBUILD=0`. A `.codegraph/.autobuild.lock` keeps two session starts from
+building at once. Full setup and knobs: [`references/hook_setup.md`](references/hook_setup.md).
+`tests/test_session_hook.py` (8 tests: opt-out, non-code dir, missing/stale/fresh graph,
+the lock, the background worker).
+
 ## Auto-Build Protocol (Script-First)
 
-### Rule 1: First Encounter → Generate + Run
-When opening a project for the first time:
-1. Check `.codegraph/graph.json`. If present and fresh → skip to Rule 2.
+### Rule 1: First Contact → Generate + Run
+At the **start of any task that touches an established codebase** — a question about it,
+*or* implementing / fixing / refactoring / reviewing code in it — not only when a
+structure question is asked:
+1. Check `.codegraph/graph.json`. If present and fresh → skip to Rule 2. (If the
+   `SessionStart` hook is wired, this is already done — it prints `graph ready (N nodes,
+   M edges)` and you can go straight to querying.)
 2. If absent → run `python codegraph_builder.py <project_root>` (copy the script from
    this skill's `scripts/` folder into the project, or invoke it by full path — it needs
    no adaptation per project, it detects languages by extension on its own).
 3. The script produces `.codegraph/graph.json`, `.codegraph/GRAPH_REPORT.md` and
    `.codegraph/graph.html`.
 4. Notify: "Graph built. {N} nodes, {M} edges." (use the numbers the script prints).
+
+### Rule 1 bis: Query the graph before you grep
+Any time you are about to use `grep`/`glob`/`Read` to answer a **relational** question
+about the code — who calls or subclasses a symbol, what depends on it, how two parts
+connect, where execution starts, what a change would break, which tests to re-run —
+stop and run the matching `/graph` command instead (Rule 2). It is complete where grep
+is not (it follows indirect calls, re-exports, inheritance) and it returns the *impact*
+view grep never gives. Reserve `grep`/`glob`/`Read` for what the graph genuinely is not:
+opening one specific file you already know you need, or searching for a literal string,
+a config value, an error message, or a comment.
 
 ### Rule 2: Query → Never Load the Whole JSON
 When the user asks anything about the codebase:

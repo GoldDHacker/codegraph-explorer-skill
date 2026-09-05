@@ -120,7 +120,7 @@ from datetime import datetime, timezone
 from fnmatch import fnmatch
 
 # == Configuration ============================================================
-VERSION = "4.6"
+VERSION = "4.7"
 GRAPH_DIR = ".codegraph"
 GRAPH_FILE = "graph.json"
 CACHE_FILE = ".file_cache.json"
