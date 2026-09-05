@@ -4,8 +4,15 @@
 pytest>=7
 
 # Optional: installing these lets the tree-sitter test files actually run instead of
-# skipping. tree-sitter is capped at <0.25 -- 0.26 segfaults mid-parse on a real TS
-# tree with the current grammar wheels.
-tree-sitter>=0.23,<0.25
+# skipping. The core is pinned to 0.25.x: <0.25 rejects the ABI-15 grammar wheels that
+# go/rust/c/php now ship, and 0.26.0 segfaults mid-parse on a real TS tree. Run
+# `python scripts/codegraph_builder.py --doctor` to check the loaded set.
+tree-sitter>=0.25,<0.26
 tree-sitter-javascript
 tree-sitter-typescript
+tree-sitter-java
+tree-sitter-go
+tree-sitter-rust
+tree-sitter-c
+tree-sitter-cpp
+tree-sitter-php

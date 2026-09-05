@@ -15,12 +15,17 @@ safer for languages where that convention holds.
 
 ## JavaScript / TypeScript / Java — tree-sitter (v4.0, optional)
 
-`pip install tree-sitter tree-sitter-javascript tree-sitter-typescript
-tree-sitter-java` (any subset — each grammar is imported independently in the script;
-a missing package for one language never disables the others). When available for a
-given file's language, `extract_tree_sitter()` runs instead of the regex path; on any
-parse exception, or when the language's grammar isn't installed, the script falls back
-to `extract_regex()` for that file, logged at `--verbose` as "tree-sitter extraction
+`pip install "tree-sitter>=0.25,<0.26" tree-sitter-javascript tree-sitter-typescript
+tree-sitter-java` (any subset — each grammar is loaded independently in the script; a
+missing package for one language never disables the others). The core version matters:
+`<0.25` rejects the ABI-15 wheels that `tree-sitter-go`/`-rust`/`-c`/`-php` now ship,
+and `0.26.0` segfaults mid-parse on real source — `0.25.x` is the verified line. A
+grammar that's installed but can't load (ABI mismatch) is recorded and surfaced by a
+build-time `[!]` warning and by `python codegraph_builder.py --doctor`, not silently
+dropped. When available for a given file's language, `extract_tree_sitter()` runs
+instead of the regex path; on any parse exception, or when the language's grammar isn't
+installed/loadable, the script falls back to `extract_regex()` for that file, logged at
+`--verbose` as "tree-sitter extraction
 failed, falling back to regex". `.codegraph/custom_patterns.json` entries for these
 languages still run as a separate pass either way (same as Python's AST path), so
 nothing you add there is affected by which engine handled the built-in extraction.

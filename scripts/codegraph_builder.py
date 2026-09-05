@@ -137,57 +137,84 @@ MAX_FILE_BYTES = 2 * 1024 * 1024  # skip anything bigger than 2MB (bundles, vend
 VERBOSE = False
 
 # == Optional: tree-sitter (javascript/typescript/java/go/rust/c/cpp/php extraction) ===
-# Each grammar is imported independently so that, say, tree-sitter-java missing
-# doesn't also disable the javascript/typescript grammars -- matches per file,
-# not all-or-nothing. Any language absent here simply falls back to the regex
-# engine for that language, same as if tree-sitter weren't installed at all.
+# Each grammar is loaded independently so that, say, tree-sitter-java missing doesn't
+# also disable the javascript/typescript grammars -- matches per file, not
+# all-or-nothing. Any language absent here falls back to the regex engine for that
+# language, same as if tree-sitter weren't installed at all.
+#
+# Two distinct "not available" cases, kept apart on purpose:
+#   * grammar package not installed  -> expected, silent, regex handles it.
+#   * grammar package installed but not loadable (almost always a tree-sitter core vs
+#     grammar ABI-version mismatch: `pip install -U tree-sitter` without reinstalling
+#     the grammars, or vice versa) -> recorded in TREE_SITTER_LOAD_ERRORS and surfaced
+#     as a warning at build time, because "silently less precise than documented" is
+#     exactly the kind of thing that should not be silent. Probing with a one-byte
+#     parse here forces the ABI check now rather than at the first real file.
 TREE_SITTER_LANGS = {}
+TREE_SITTER_LOAD_ERRORS = {}  # lang -> "ExcType: message", only for installed-but-broken grammars
 _TS_PARSER_CLASS = None
+
+_TS_GRAMMAR_SPECS = [
+    ('javascript', 'tree_sitter_javascript', 'language'),
+    ('typescript', 'tree_sitter_typescript', 'language_typescript'),
+    ('tsx',        'tree_sitter_typescript', 'language_tsx'),
+    ('java',       'tree_sitter_java',       'language'),
+    ('go',         'tree_sitter_go',         'language'),
+    ('rust',       'tree_sitter_rust',       'language'),
+    ('c',          'tree_sitter_c',          'language'),
+    ('cpp',        'tree_sitter_cpp',        'language'),
+    ('php',        'tree_sitter_php',        'language_php'),
+]
+
 try:
+    import importlib as _importlib
     from tree_sitter import Language as _TSLanguage, Parser as _TS_PARSER_CLASS
-    try:
-        import tree_sitter_javascript as _ts_js
-        TREE_SITTER_LANGS['javascript'] = _TSLanguage(_ts_js.language())
-    except ImportError:
-        pass
-    try:
-        import tree_sitter_typescript as _ts_ts
-        TREE_SITTER_LANGS['typescript'] = _TSLanguage(_ts_ts.language_typescript())
-        TREE_SITTER_LANGS['tsx'] = _TSLanguage(_ts_ts.language_tsx())
-    except ImportError:
-        pass
-    try:
-        import tree_sitter_java as _ts_java
-        TREE_SITTER_LANGS['java'] = _TSLanguage(_ts_java.language())
-    except ImportError:
-        pass
-    try:
-        import tree_sitter_go as _ts_go
-        TREE_SITTER_LANGS['go'] = _TSLanguage(_ts_go.language())
-    except ImportError:
-        pass
-    try:
-        import tree_sitter_rust as _ts_rust
-        TREE_SITTER_LANGS['rust'] = _TSLanguage(_ts_rust.language())
-    except ImportError:
-        pass
-    try:
-        import tree_sitter_c as _ts_c
-        TREE_SITTER_LANGS['c'] = _TSLanguage(_ts_c.language())
-    except ImportError:
-        pass
-    try:
-        import tree_sitter_cpp as _ts_cpp
-        TREE_SITTER_LANGS['cpp'] = _TSLanguage(_ts_cpp.language())
-    except ImportError:
-        pass
-    try:
-        import tree_sitter_php as _ts_php
-        TREE_SITTER_LANGS['php'] = _TSLanguage(_ts_php.language_php())
-    except ImportError:
-        pass
+    for _ts_lang, _ts_mod_name, _ts_fn_name in _TS_GRAMMAR_SPECS:
+        try:
+            _ts_mod = _importlib.import_module(_ts_mod_name)
+        except ImportError:
+            continue  # grammar not installed -- expected
+        try:
+            _ts_obj = _TSLanguage(getattr(_ts_mod, _ts_fn_name)())
+            _TS_PARSER_CLASS(_ts_obj).parse(b';')  # force the ABI check now
+            TREE_SITTER_LANGS[_ts_lang] = _ts_obj
+        except Exception as _ts_err:
+            TREE_SITTER_LOAD_ERRORS[_ts_lang] = f"{type(_ts_err).__name__}: {_ts_err}"
 except ImportError:
     pass  # tree-sitter core itself not installed -- TREE_SITTER_LANGS stays empty
+
+
+def tree_sitter_status():
+    """Human-readable rundown of what the tree-sitter engine can and can't do right now
+    -- used by `--doctor` and by the build-time warning. Kept as a plain function so it
+    has no dependency on a GraphBuilder instance."""
+    # The one combination verified to load every current grammar wheel (some ship
+    # ABI 15, which cores <0.25 reject) AND not segfault mid-parse on real source
+    # (0.26.0 does): core 0.25.x.
+    good_install = ('pip install -U "tree-sitter>=0.25,<0.26" \\\n'
+                    "      tree-sitter-javascript tree-sitter-typescript tree-sitter-java \\\n"
+                    "      tree-sitter-go tree-sitter-rust tree-sitter-c tree-sitter-cpp tree-sitter-php")
+    lines = []
+    if _TS_PARSER_CLASS is None:
+        lines.append("tree-sitter core not installed -- every language uses the regex engine.")
+        lines.append("  to enable it:")
+        lines.append(f"    {good_install}")
+        return lines
+    loaded = sorted(TREE_SITTER_LANGS)
+    lines.append(f"tree-sitter core: OK   grammars loaded: {', '.join(loaded) if loaded else '(none)'}")
+    if TREE_SITTER_LOAD_ERRORS:
+        lines.append("  grammars installed but NOT loadable -- regex fallback in use for these:")
+        for lang, err in sorted(TREE_SITTER_LOAD_ERRORS.items()):
+            lines.append(f"    - {lang}: {err}")
+        lines.append("  this is a tree-sitter core/grammar ABI mismatch (an 'Incompatible Language")
+        lines.append("  version' error means the grammar wheel is newer than the core supports).")
+        lines.append("  fix by pinning both to the verified-good line and reinstalling together:")
+        lines.append(f"    {good_install}")
+    never = [l for l in ('javascript', 'typescript', 'java', 'go', 'rust', 'c', 'cpp', 'php')
+             if l not in TREE_SITTER_LANGS and l not in TREE_SITTER_LOAD_ERRORS]
+    if never:
+        lines.append(f"  not installed (optional -- regex fallback in use): {', '.join(never)}")
+    return lines
 
 # Languages whose tree-sitter walk emits real call_expression call sites (fed to
 # resolve_references() instead of the regex `\bname(` body scan). Started as JS/TS in
@@ -2432,6 +2459,18 @@ class GraphBuilder:
         keep watching, since the guard will naturally re-fire on the next detected
         change without crashing the whole watcher."""
         t0 = time.time()
+
+        # A grammar package that's installed but can't load (ABI mismatch) would
+        # otherwise just silently degrade that language to the regex engine -- "less
+        # precise than SKILL.md says" with nothing to tell you why. Say it once, loudly,
+        # at the top of every build, with the fix. `--doctor` prints the full picture.
+        if TREE_SITTER_LOAD_ERRORS:
+            broken = ", ".join(sorted(TREE_SITTER_LOAD_ERRORS))
+            log(f"[!] tree-sitter grammar(s) installed but not loadable -> using the regex "
+                f"fallback for: {broken}")
+            log(f"    almost always a tree-sitter core/grammar ABI mismatch. Run "
+                f"`python {Path(__file__).name} --doctor` for details and the fix.")
+
         log("[discovery] walking project tree...")
         files = self.discover()
         log(f"   {len(files)} files found")
@@ -4239,6 +4278,11 @@ def main():
                               "ntype, path, line_start, line_end, community, degree, meta) and "
                               "Edge(FROM Symbol TO Symbol, etype, tag, confidence, meta)")
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose diagnostics")
+    parser.add_argument("--doctor", action="store_true",
+                         help="Print the tree-sitter engine status -- which grammars loaded, "
+                              "which are installed but ABI-incompatible with the core (and how "
+                              "to fix that), which aren't installed -- then exit. Touches no "
+                              "project files.")
     parser.add_argument("--force-rebuild", action="store_true",
                          help="Bypass the shrink-guard that refuses to build when discover() "
                               "finds far fewer files than were previously tracked (a safety net "
@@ -4295,6 +4339,12 @@ def main():
     args = parser.parse_args()
 
     VERBOSE = args.verbose
+
+    if args.doctor:
+        for line in tree_sitter_status():
+            log(line)
+        return
+
     root = Path(args.path).resolve()
     if not root.exists():
         log(f"[!] path does not exist: {root}")

@@ -25,11 +25,14 @@ l'orchestrateur, le script est le worker.
    initiative — relancer avec `--verbose` pour voir ce qui est ignoré et pourquoi (un
    chemin erroné, un pattern `.gitignore`/`.codegraphignore` trop large), et si la
    cause reste peu claire, demander à l'utilisateur avant de forcer.
-6. Ce build utilise tree-sitter (v4.0) pour JS/TS/Java quand les paquets sont installés
-   (`pip install tree-sitter tree-sitter-javascript tree-sitter-typescript
-   tree-sitter-java`), sans rien changer côté Claude : mêmes commandes, même format de
-   sortie, méthodes de classe en plus dans le graphe si présent. Rien à faire ou à
-   vérifier ici — signalé pour info, pas une étape supplémentaire du protocole.
+6. Ce build utilise tree-sitter (v4.0) pour JS/TS/Java/Go/Rust/C/C++/PHP quand les
+   paquets sont installés (`pip install "tree-sitter>=0.25,<0.26" tree-sitter-javascript
+   tree-sitter-typescript tree-sitter-java tree-sitter-go tree-sitter-rust tree-sitter-c
+   tree-sitter-cpp tree-sitter-php`), sans rien changer côté Claude : mêmes commandes,
+   même format de sortie, méthodes de classe et résolution `calls` par AST en plus si
+   présent. Si un build affiche `[!] tree-sitter grammar(s) installed but not
+   loadable`, lancer `python codegraph_builder.py --doctor` et relayer la ligne `pip`
+   qu'il propose à l'utilisateur — sinon, rien à faire ni à vérifier ici.
 
 ### Règle 2 : Query → Jamais le JSON en entier
 **Quand** : L'utilisateur pose une question sur le code.

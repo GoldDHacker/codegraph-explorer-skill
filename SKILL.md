@@ -407,10 +407,22 @@ isn't JS/TS.
   only computed on the slow path (mtime already disagrees), so an unchanged tree
   costs nothing extra. Old cache entries without a `sha` just re-parse once.
 
-- **tree-sitter is pinned to `>=0.23,<0.25`.** `tree-sitter` 0.26 segfaults (native
-  access violation) partway through parsing a real TS tree with the current grammar
-  wheels; 0.23.x is the last line this code was verified against. `pip install` lines
-  below carry the constraint.
+- **tree-sitter is pinned to `>=0.25,<0.26`, and grammar-load failures are no longer
+  silent.** The version matrix turned out to be narrow: `tree-sitter` core `<0.25`
+  rejects the ABI-15 grammar wheels that `tree-sitter-go`/`-rust`/`-c`/`-php` now ship
+  (`ValueError: Incompatible Language version 15`), and core `0.26.0` loads everything
+  but segfaults partway through parsing a real TS tree — so `0.25.x` is the only line
+  that both loads every current grammar and stays up. Two code changes go with the
+  pin: (1) each grammar is loaded through one loop that catches *any* exception, not
+  just `ImportError`, and probes with a one-byte parse — so an ABI-incompatible
+  grammar is recorded in `TREE_SITTER_LOAD_ERRORS` and the language falls back to
+  regex instead of the whole script crashing at import; (2) every build prints a `[!]`
+  line naming the affected languages when that happens, and a new `--doctor` flag
+  (`python codegraph_builder.py --doctor`) prints the full engine status — which
+  grammars loaded, which are installed-but-incompatible with the exact error, which
+  aren't installed — plus the verified-good `pip install` line. Before this, an ABI
+  mismatch meant "silently less precise than this file claims" with nothing to explain
+  why.
 
 - **`graph.html` is genuinely offline again.** Between v3.4 and v4.4 the renderer
   regressed to loading D3 from `https://d3js.org/d3.v7.min.js` — a network dependency

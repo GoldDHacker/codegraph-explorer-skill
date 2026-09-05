@@ -50,6 +50,7 @@ A skill for Claude Code, inspired by **Graphify** and **Understand Anything**.
 | The incremental cache was keyed on `mtime` alone: `git checkout`, `git stash pop`, `rsync`, `touch` move the timestamp without touching content → the whole project re-parsed for nothing | Secondary content-hash key (v4.5): `.file_cache.json` stores a `sha` sha256; a stale `mtime` but a matching `sha` → served from cache, `mtime` refreshed for next time. The hash is only computed on the slow path (mtime already different) — an unchanged tree costs nothing extra |
 | `--impact X` mixed impacted prod code and tests in one list — no way to see "which tests to re-run" at a glance | `--impact` split prod / test (v4.5, #D): every `file` node carries `metadata.role` (`"test"` for a `tests/`/`spec/`/… directory segment or a `test_*.py`/`*_test.go`/`*.test.ts`/… name, else `"prod"`); `--impact` outputs the detailed list as prod only + a `tests_to_run` field listing the test files that transitively exercise the changed symbol |
 | "Which file depends on which file?" meant walking thousands of `function` nodes | Aggregated `file → file` edges (v4.5, #C): `calls`/`inherits` edges collapsed into one weighted edge per (source file → target file) pair, stored separately in `graph.json["file_deps"]` (not mixed into `edges`). `--file-deps [FILE|SYMBOL]` command — a file's incoming/outgoing dependencies, or the whole list sorted by weight. A lookup over a few hundred entries, instant |
+| A grammar package installed but ABI-incompatible with the tree-sitter core (`ValueError: Incompatible Language version 15`) either crashed the whole script at import, or dropped that language to regex with nothing said — "less precise than documented" invisibly | Robust grammar loading (v4.5): one loop catches any load error, probes with a one-byte parse, records the failure in `TREE_SITTER_LOAD_ERRORS`, and keeps going on regex for that language. Every build prints a `[!]` line naming the affected languages; new `--doctor` flag prints the full engine status + the verified `pip` line. Core pinned `>=0.25,<0.26` — the only line that loads today's ABI-15 grammars *and* doesn't segfault (0.26.0 does) |
 
 The full list of bugs found and fixed is in `SKILL.md` (§ "What changed in v3" … "What changed in v4.5").
 
@@ -140,7 +141,7 @@ codegraph/
 ## Supported languages (by the script)
 
 - **Python**: native AST parsing (`ast` module) — most precise, with a regex fallback on `SyntaxError`
-- **JavaScript/TypeScript (incl. `.tsx`)**: **tree-sitter** (v4.0, optional — `pip install "tree-sitter>=0.23,<0.25" tree-sitter-javascript tree-sitter-typescript`) if installed — real AST, **class methods included** (private/protected/getter/setter/static/constructor), plus AST-driven `calls` (v4.5); otherwise unanchored regex fallback (v3, no method-level extraction)
+- **JavaScript/TypeScript (incl. `.tsx`)**: **tree-sitter** (v4.0, optional — `pip install "tree-sitter>=0.25,<0.26" tree-sitter-javascript tree-sitter-typescript`) if installed — real AST, **class methods included** (private/protected/getter/setter/static/constructor), plus AST-driven `calls` (v4.5); otherwise unanchored regex fallback (v3, no method-level extraction)
 - **Go**: **tree-sitter** (v4.2, optional — `pip install tree-sitter-go`) if installed — methods scoped to the receiver type, grouped imports (`import (...)`) finally captured; otherwise anchored regex fallback (grouped imports invisible, no methods)
 - **Rust**: **tree-sitter** (v4.2, optional — `pip install tree-sitter-rust`) if installed — methods (`impl`/`impl Trait for Type`, with an `inherits` edge to the trait, **same file only**), full grouped `use` captured; otherwise anchored regex fallback (no methods, grouped `use` truncated)
 - **Java**: **tree-sitter** (v4.0, optional — `pip install tree-sitter-java`) if installed — classes, interfaces, imports, **and methods/constructors**; otherwise regex fallback (v3: classes/interfaces/imports only, see `references/extraction_patterns.md`)
@@ -164,14 +165,20 @@ you add patterns in `.codegraph/custom_patterns.json` (see `SKILL.md`).
 
 ```bash
 pip install watchdog                                                          # responsive watch mode
-pip install "tree-sitter>=0.23,<0.25" tree-sitter-javascript tree-sitter-typescript tree-sitter-java  # methods + AST calls JS/TS/Java
-pip install tree-sitter-go tree-sitter-rust tree-sitter-c tree-sitter-cpp tree-sitter-php  # methods Go/Rust/C/C++/PHP (v4.2)
+# tree-sitter: install the core and every grammar you want in ONE line so pip resolves
+# a compatible set. The core is capped at <0.26 (0.26.0 segfaults mid-parse) and >=0.25
+# (older cores reject the ABI-15 grammar wheels that go/rust/c/php now ship).
+pip install "tree-sitter>=0.25,<0.26" \
+  tree-sitter-javascript tree-sitter-typescript tree-sitter-java \
+  tree-sitter-go tree-sitter-rust tree-sitter-c tree-sitter-cpp tree-sitter-php
 pip install ladybug                                                           # --sync-graphdb / --cypher
 pip install python-igraph leidenalg                                          # --community-algo leiden (v4.4, prebuilt wheels)
 ```
-> `tree-sitter` **0.26 segfaults** partway through parsing a real TS tree with the
-> current grammar wheels; hence the `<0.25` bound. 0.23.x is the last line this code
-> has been verified against.
+> Check what actually loaded with **`python codegraph_builder.py --doctor`**. If it
+> reports a grammar as "installed but NOT loadable" (`Incompatible Language version`),
+> the core and that grammar are from mismatched ABI generations — reinstall both with
+> the one-line command above. A build also prints a `[!]` warning when this happens
+> rather than silently dropping to regex for that language.
 
 Each is evaluated independently at import: the absence of one (or several) never
 disables the rest of the script — see `SKILL.md` § "What changed in v4.0" for the
@@ -188,6 +195,7 @@ python codegraph_builder.py --export-obsidian /path/to/project  # regenerate the
 python codegraph_builder.py --sync-graphdb /path/to/project     # export to .codegraph/graph_db/ (Ladybug)
 python codegraph_builder.py --force-rebuild /path/to/project    # bypass the shrink-guard
 python codegraph_builder.py --verbose /path/to/project   # detailed diagnostics
+python codegraph_builder.py --doctor                     # tree-sitter engine status (loaded / ABI-broken / missing grammars)
 
 # read-only queries over the existing graph.json (nothing is re-parsed):
 python codegraph_builder.py /path/to/project --explain AuthService
