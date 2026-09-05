@@ -4,7 +4,7 @@ description: Turn any codebase into a queryable knowledge graph so architecture 
 license: MIT
 ---
 
-# CodeGraph Explorer — Script-First Architecture (v4.5)
+# CodeGraph Explorer — Script-First Architecture (v4.6)
 
 ## Description
 Turn any codebase into a queryable knowledge graph. Inspired by Graphify and Understand Anything.
@@ -407,23 +407,6 @@ isn't JS/TS.
   only computed on the slow path (mtime already disagrees), so an unchanged tree
   costs nothing extra. Old cache entries without a `sha` just re-parse once.
 
-- **tree-sitter is pinned to `>=0.25,<0.26`, and grammar-load failures are no longer
-  silent.** The version matrix turned out to be narrow: `tree-sitter` core `<0.25`
-  rejects the ABI-15 grammar wheels that `tree-sitter-go`/`-rust`/`-c`/`-php` now ship
-  (`ValueError: Incompatible Language version 15`), and core `0.26.0` loads everything
-  but segfaults partway through parsing a real TS tree — so `0.25.x` is the only line
-  that both loads every current grammar and stays up. Two code changes go with the
-  pin: (1) each grammar is loaded through one loop that catches *any* exception, not
-  just `ImportError`, and probes with a one-byte parse — so an ABI-incompatible
-  grammar is recorded in `TREE_SITTER_LOAD_ERRORS` and the language falls back to
-  regex instead of the whole script crashing at import; (2) every build prints a `[!]`
-  line naming the affected languages when that happens, and a new `--doctor` flag
-  (`python codegraph_builder.py --doctor`) prints the full engine status — which
-  grammars loaded, which are installed-but-incompatible with the exact error, which
-  aren't installed — plus the verified-good `pip install` line. Before this, an ABI
-  mismatch meant "silently less precise than this file claims" with nothing to explain
-  why.
-
 - **`graph.html` is genuinely offline again.** Between v3.4 and v4.4 the renderer
   regressed to loading D3 from `https://d3js.org/d3.v7.min.js` — a network dependency
   that blanks the page the moment it's opened without connectivity, directly
@@ -435,6 +418,76 @@ isn't JS/TS.
   node now fades everything except that node and its direct neighbours. Same feature
   set as the D3 version otherwise, ~290 lines of embedded JS. Verified by building a
   graph and opening the result with `window.d3 === undefined` and no console errors.
+
+## What changed in v4.6
+
+Three things: a reasoning-mode addition ("Phase 6"), a tree-sitter robustness fix, and
+housekeeping (SKILL.md frontmatter, a bilingual README).
+
+### tree-sitter: pinned to `>=0.25,<0.26`, and load failures are no longer silent
+
+The version matrix turned out to be narrow: `tree-sitter` core `<0.25` rejects the
+ABI-15 grammar wheels that `tree-sitter-go`/`-rust`/`-c`/`-php` now ship (`ValueError:
+Incompatible Language version 15`), and core `0.26.0` loads everything but segfaults
+partway through parsing a real TS tree — so `0.25.x` is the only line that both loads
+every current grammar and stays up. Two code changes go with the pin: (1) each grammar
+is loaded through one loop that catches *any* exception, not just `ImportError`, and
+probes with a one-byte parse — so an ABI-incompatible grammar is recorded in
+`TREE_SITTER_LOAD_ERRORS` and the language falls back to regex instead of the whole
+script crashing at import; (2) every build prints a `[!]` line naming the affected
+languages when that happens, and a new `--doctor` flag (`python codegraph_builder.py
+--doctor`) prints the full engine status — which grammars loaded, which are
+installed-but-incompatible with the exact error, which aren't installed — plus the
+verified-good `pip install` line. Before this, an ABI mismatch meant "silently less
+precise than this file claims" with nothing to explain why. `tests/test_doctor.py`.
+
+### Housekeeping
+
+- **SKILL.md now starts with YAML frontmatter** (`name: codegraph`, `description`,
+  `license`) — the skill loader rejects a SKILL.md without it. `.gitattributes` pins
+  this file to `eol=lf` so a CRLF checkout can't trip the frontmatter parser.
+- **Bilingual README**: `README.md` is English (GitHub's default view), `README.fr.md`
+  is the French version, each linking to the other; both carry the `docs/graph-preview`
+  illustration.
+
+### Phase 6 — the reasoning subgraph
+
+Proposed as a genuine architectural question (does Claude only ever *read verdicts*
+about the graph, or can it *reason over the structure directly*), evaluated critically
+rather than adopted wholesale, then implemented and measured like every prior phase:
+
+- **`--subgraph SYMBOL --depth N --json`**: extracts a bounded neighborhood as
+  structured data for Claude to reason over directly, for open-ended questions
+  (`Rule 2 bis` above) that don't reduce to one of Rule 2's precomputed commands. The
+  original proposal suggested letting Claude spot cycles and "what breaks this apart"
+  by reading the raw node/edge JSON — rejected on the same grounds this whole skill is
+  built on: cycle detection and articulation points are exact, well-known O(V+E) graph
+  algorithms, not interpretation, and an LLM reconstructing them by eye is a real
+  failure mode past a handful of nodes, strictly worse *and* more expensive than the
+  script just computing them. So the script computes them: `cut_vertices`,
+  `focus_is_cut_vertex`, `components_if_focus_removed` (Tarjan's articulation-point
+  algorithm) and `cycles_through_focus` (a bounded representative-cycle search) ship as
+  precomputed fields, scoped honestly to the extracted neighborhood only, never claimed
+  as a whole-project fact. Low-confidence `calls` edges are filtered by a script-side
+  default (`min_confidence=0.5`, `--include-low-confidence` to override) rather than
+  left to a SKILL.md reminder Claude might apply inconsistently.
+- **Node cap, added after measuring, not guessing**: the original proposal estimated
+  "30-80 nodes" as a reasonable size without running anything. A real run against a
+  genuine hub class (degree 42) in a 807-node/2012-edge project (Python's own `email`
+  package, not a toy fixture) at `--depth 2` came back at 100 nodes/258 edges and
+  ~104KB of JSON — tens of thousands of tokens for one call, defeating the entire
+  point versus reading `graph.json` directly. `--max-nodes` (default 60, BFS order)
+  caps this, with `"truncated": true` reported explicitly rather than silently
+  returning a smaller neighborhood than what's actually reachable; the same hub-class
+  query capped at 60 nodes still measured ~38KB — real, meaningfully more expensive
+  than `--explain`, which is exactly why Rule 2 bis says to prefer the cheaper commands
+  whenever one already answers the question.
+- **15 new regression tests** (`tests/test_subgraph.py`): a hand-verified cycle+cut-
+  vertex fixture (four functions in an undirected 4-cycle plus a pendant node, checked
+  by hand before being asserted), depth-bounding, the confidence-filtering default and
+  its override (using a real measured confidence value — 0.35 for a 5-candidate
+  ambiguous call — rather than an assumed one), the node-cap truncation flag, and
+  JSON-shape/edge-case coverage (no match, ambiguous symbol, an isolated node).
 
 ## Auto-Build Protocol (Script-First)
 
@@ -470,6 +523,40 @@ When the user asks anything about the codebase:
    loading the file into your own context, exactly as you would with any other large
    local data file.
 6. **NEVER** open raw source files to answer architecture questions.
+
+### Rule 2 bis: Open/Interpretive Question → `--subgraph`, Not a Guess (v4.6)
+Rule 2's query commands are the *answer* to a question that reduces to one precomputed
+thing (a caller list, a blast radius, a shortest path). Some real questions don't reduce
+to one thing: "is this module well isolated", "why does this design hold up", "what's
+the shape of this cluster", "detect a problem in this area" — no single flag computes
+"well isolated". For these:
+1. Run `python codegraph_builder.py <path> --subgraph SYMBOL --depth 2 --json`
+   (`/graph subgraph SYMBOL`) instead of guessing from `--explain`/`--impact` output or,
+   worse, reading source files.
+2. You now have curated raw material — a bounded neighborhood (default cap 60 nodes,
+   `"truncated": true` if it hit that cap) — to reason over directly: which edges are
+   `RESOLVED` vs low-confidence coincidences, which communities the nodes fall into,
+   what connects to what.
+3. **Do not** try to spot cycles or "if this breaks, does the graph split apart"
+   yourself by eyeballing the node/edge list — that is exact graph theory (Tarjan's
+   articulation points, cycle detection), not interpretation, and an LLM reconstructing
+   it by reading a list of edges is a well-known place to miscount past a handful of
+   nodes. The script already computed it: use `cut_vertices`, `focus_is_cut_vertex`,
+   `components_if_focus_removed`, and `cycles_through_focus` directly from the JSON as
+   given facts, and spend your own reasoning on what they *mean* for the question asked
+   (e.g. "AuthService is a cut vertex with 2 components on removal — Payment and Billing
+   only reach each other through it, so yes, it's a real chokepoint, not just a name").
+4. Low-confidence `calls` edges (a name shared by unrelated symbols) are excluded by
+   default (`min_confidence` 0.5) — don't second-guess this by asking for
+   `--include-low-confidence` unless you have a specific reason to suspect a real edge
+   was filtered; the default exists because a coincidental name match is noise for this
+   kind of reasoning, not signal.
+5. Still prefer Rule 2's commands whenever one of them already answers the question —
+   `--subgraph` costs meaningfully more tokens (a real hub-node query on a genuine
+   807-node project measured ~38KB of JSON even after the node cap, vs a few hundred
+   tokens for `--callers`) for a reason: it's material to *think with*, not a lookup.
+   Reaching for it on "who calls X" would be paying analysis-sized cost for a
+   lookup-sized question.
 
 ### Rule 3: Stale Detection → Incremental Re-run
 If `.codegraph/graph.json`'s `generated_at` predates the newest source file's mtime:
@@ -585,6 +672,32 @@ breaks if I touch this file", or "what are the hub files" — it's a lookup over
 hundred file pairs, not a traversal of every function node, so it stays instant on a
 large project where `--impact` at the symbol level would return thousands of nodes.
 
+### `/graph subgraph <symbol> [--depth N]` (v4.6)
+Run `python codegraph_builder.py <path> --subgraph <symbol> --depth N --json` (default
+depth 2). Returns a bounded neighborhood around `symbol` — nodes + edges within N hops
+over `calls`/`inherits` only — as structured data for **you to reason over directly**,
+not a pre-formatted verdict. This is the command Rule 2 bis routes to for open-ended
+"why"/"how is this shaped" questions that `--explain`/`--callers`/`--impact` don't
+reduce to. The script precomputes, over the extracted neighborhood only (never claimed
+to be true of the whole project graph — a wider `--depth` can reveal a path this call
+didn't see):
+- `cut_vertices` / `focus_is_cut_vertex` — Tarjan's articulation-point algorithm; a true
+  cut vertex has no other path within this neighborhood, computed exactly, not eyeballed
+- `components_if_focus_removed` — how many disconnected pieces the neighborhood splits
+  into without the focus node (only meaningful when `focus_is_cut_vertex` is true)
+- `cycles_through_focus` — up to 8 example simple cycles containing the focus node
+  (shortest representative per neighbor pair, not exhaustive cycle enumeration)
+Low-confidence `calls` edges (< 0.5) are excluded by default — `--min-confidence F` to
+change the floor, `--include-low-confidence` to see them all. Hard-capped at 60 nodes
+by default (`--max-nodes N`); a capped result sets `"truncated": true` rather than
+silently describing a smaller neighborhood than what's actually reachable — narrow
+`--depth` or start from a less central symbol if you hit it. This is real graph-theory
+computation, not a bigger read: a genuine hub-class query on an 807-node/2012-edge
+project (a real Python stdlib package, not a toy) measured ~38KB of JSON even after the
+cap — meaningfully more than `--explain`'s few hundred tokens, so reach for `--explain`/
+`--callers`/`--impact` first whenever one of them already answers the question (see
+Rule 2 bis, point 5).
+
 ### `/graph query "<question>"`
 Free-form questions don't map to a single CLI flag — this is where Claude's own
 reasoning earns its keep, not the script's. Decide which primitive(s) answer the
@@ -594,6 +707,8 @@ question, run those, and synthesize:
 - "Which services depend on payment?" → `--callers` on the relevant payment symbol(s)
 - "Find entry points to UserRepository" → `--trace-entrypoints UserRepository` directly
 - "What would break if I changed X?" → `--impact X` directly
+- "Is X well isolated / what's the shape of this cluster / detect a problem here" →
+  `--subgraph X --depth 2 --json` and reason over the result directly (Rule 2 bis)
 - Anything broader ("how is this organized") → `GRAPH_REPORT.md`, not the query commands
 
 ### `/graph community`
@@ -730,7 +845,11 @@ back to reading source files unless the graph explicitly says
 practice this means: never. For a question none of the query commands cover — a
 multi-hop pattern, an aggregation, a filter across many nodes at once — `/graph cypher`
 (v4.0, requires `--sync-graphdb` first) is the escape hatch; it never replaces the
-commands above for the questions they already answer.
+commands above for the questions they already answer. For an open-ended "why"/"how is
+this shaped" question that isn't a lookup at all — see Rule 2 bis and `/graph subgraph`
+(v4.6) — reason over the returned neighborhood yourself, but treat `cut_vertices`,
+`cycles_through_focus`, and `components_if_focus_removed` as computed facts to cite,
+never as something to re-derive by eye from the node/edge list.
 
 ## Privacy & Safety
 

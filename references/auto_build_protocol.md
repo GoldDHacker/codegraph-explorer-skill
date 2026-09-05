@@ -1,4 +1,4 @@
-# Auto-Build Protocol — Script-First Edition (v4.5)
+# Auto-Build Protocol — Script-First Edition (v4.6)
 
 ## Principe
 Le graphe est construit par un **script local**, pas par Claude. Claude est
@@ -52,6 +52,31 @@ l'orchestrateur, le script est le worker.
 6. Répondre en citant les nœuds et edges, avec la `confidence` pour les edges `calls`
    (voir `query_protocol.md`).
 7. Jamais les fichiers sources pour répondre à une question d'architecture.
+
+### Règle 2 bis : Question ouverte/interprétative → `--subgraph`, jamais une supposition (v4.6)
+**Quand** : la question ne se réduit pas à une seule chose pré-calculée par la Règle 2 —
+"est-ce que X est bien isolé", "pourquoi cette architecture tient", "quelle est la forme
+de ce cluster", "détecte un problème dans cette zone".
+**Action** :
+1. `python codegraph_builder.py <racine_du_projet> --subgraph <symbole> --depth 2 --json`
+   — voisinage borné (nœuds + edges, plafonné à 60 nœuds par défaut, `"truncated": true`
+   si atteint) au lieu de deviner à partir de `--explain`/`--impact`, et surtout au lieu
+   d'ouvrir des fichiers source.
+2. Le script calcule déjà, sur ce voisinage : `cut_vertices`/`focus_is_cut_vertex`
+   (points d'articulation, algorithme de Tarjan), `components_if_focus_removed`, et
+   `cycles_through_focus` (cycles simples représentatifs). **Ne jamais** essayer de
+   retrouver un cycle ou un point de coupure à l'œil en relisant la liste de nœuds/edges
+   — c'est du calcul mécanique exact, pas de l'interprétation, et un LLM qui recompte des
+   arêtes à la main se trompe régulièrement au-delà d'une poignée de nœuds. Ces champs
+   sont scopés au voisinage extrait uniquement — pas une garantie sur tout le projet.
+3. Les edges `calls` à faible confidence (< 0.5) sont exclus par défaut — ne pas
+   redemander `--include-low-confidence` sans raison précise.
+4. Claude apporte l'interprétation par-dessus ces faits calculés (voir
+   `query_protocol.md` pour un exemple complet de synthèse).
+5. Toujours préférer les commandes de la Règle 2 quand l'une d'elles répond déjà à la
+   question — `--subgraph` coûte nettement plus cher (mesuré : ~38 Ko même après
+   troncature à 60 nœuds, sur un nœud hub réel d'un projet de 807 nœuds) qu'un
+   `--callers`/`--explain` à quelques centaines de tokens.
 
 ### Règle 3 : Stale Detection → Incremental Re-run
 **Quand** : `generated_at` dans `graph.json` précède la date de modification du fichier
@@ -115,6 +140,8 @@ contrat que la Règle 5).
 - ❌ Claude lit 20 fichiers pour répondre à "comment fonctionne X ?"
 - ❌ Claude présente un edge `calls` à faible `confidence` comme un fait établi sans le
   signaler (voir `query_protocol.md`)
+- ❌ Claude essaie de détecter un cycle ou un point de coupure à l'œil en lisant une
+  sortie `--subgraph` au lieu d'utiliser les champs déjà calculés (v4.6)
 
 ## Patterns obligatoires
 - ✅ Claude exécute le script, le script fait le travail — y compris pour répondre aux

@@ -1,4 +1,4 @@
-# 🧠 CodeGraph Explorer — Script-First (v4.5)
+# 🧠 CodeGraph Explorer — Script-First (v4.6)
 
 *🇬🇧 English · [🇫🇷 Français](README.fr.md)*
 
@@ -50,9 +50,10 @@ A skill for Claude Code, inspired by **Graphify** and **Understand Anything**.
 | The incremental cache was keyed on `mtime` alone: `git checkout`, `git stash pop`, `rsync`, `touch` move the timestamp without touching content → the whole project re-parsed for nothing | Secondary content-hash key (v4.5): `.file_cache.json` stores a `sha` sha256; a stale `mtime` but a matching `sha` → served from cache, `mtime` refreshed for next time. The hash is only computed on the slow path (mtime already different) — an unchanged tree costs nothing extra |
 | `--impact X` mixed impacted prod code and tests in one list — no way to see "which tests to re-run" at a glance | `--impact` split prod / test (v4.5, #D): every `file` node carries `metadata.role` (`"test"` for a `tests/`/`spec/`/… directory segment or a `test_*.py`/`*_test.go`/`*.test.ts`/… name, else `"prod"`); `--impact` outputs the detailed list as prod only + a `tests_to_run` field listing the test files that transitively exercise the changed symbol |
 | "Which file depends on which file?" meant walking thousands of `function` nodes | Aggregated `file → file` edges (v4.5, #C): `calls`/`inherits` edges collapsed into one weighted edge per (source file → target file) pair, stored separately in `graph.json["file_deps"]` (not mixed into `edges`). `--file-deps [FILE|SYMBOL]` command — a file's incoming/outgoing dependencies, or the whole list sorted by weight. A lookup over a few hundred entries, instant |
-| A grammar package installed but ABI-incompatible with the tree-sitter core (`ValueError: Incompatible Language version 15`) either crashed the whole script at import, or dropped that language to regex with nothing said — "less precise than documented" invisibly | Robust grammar loading (v4.5): one loop catches any load error, probes with a one-byte parse, records the failure in `TREE_SITTER_LOAD_ERRORS`, and keeps going on regex for that language. Every build prints a `[!]` line naming the affected languages; new `--doctor` flag prints the full engine status + the verified `pip` line. Core pinned `>=0.25,<0.26` — the only line that loads today's ABI-15 grammars *and* doesn't segfault (0.26.0 does) |
+| A grammar package installed but ABI-incompatible with the tree-sitter core (`ValueError: Incompatible Language version 15`) either crashed the whole script at import, or dropped that language to regex with nothing said — "less precise than documented" invisibly | Robust grammar loading (v4.6): one loop catches any load error, probes with a one-byte parse, records the failure in `TREE_SITTER_LOAD_ERRORS`, and keeps going on regex for that language. Every build prints a `[!]` line naming the affected languages; new `--doctor` flag prints the full engine status + the verified `pip` line. Core pinned `>=0.25,<0.26` — the only line that loads today's ABI-15 grammars *and* doesn't segfault (0.26.0 does) |
+| `--explain`/`--callers`/`--impact` are the *answer* to a question that reduces to one precomputed thing — but "is my auth well isolated?", "why does this design hold up?", "what's the shape of this cluster?" don't reduce to a single flag; Claude could only read source or guess from other commands' output | Reasoning subgraph (v4.6, "Phase 6"): `--subgraph SYMBOL --depth N --json` returns a bounded neighborhood (nodes + `calls`/`inherits` edges, capped at 60 nodes, `"truncated": true` if hit) as raw material for Claude to reason over directly. The **exact** structural properties — cut vertices (Tarjan), `components_if_focus_removed`, example cycles through the focus — are computed by the script and shipped as fields, never left for an LLM to eyeball from an edge list. Low-confidence `calls` edges filtered by a `--min-confidence` default (0.5), not a prose reminder. Measured ~38 KB JSON on a real 807-node hub query — meaningfully pricier than `--callers`, so a routing rule (`why/how → subgraph`, `who/how-many/which-path → the existing commands`) keeps it for the questions that need it |
 
-The full list of bugs found and fixed is in `SKILL.md` (§ "What changed in v3" … "What changed in v4.5").
+The full list of bugs found and fixed is in `SKILL.md` (§ "What changed in v3" … "What changed in v4.6").
 
 ## 🚀 Installation
 
@@ -73,7 +74,10 @@ Graph built. 1247 nodes, 3892 edges.
 ### Architecture questions
 For a targeted question, Claude calls `--explain`/`--callers`/`--find-path`/
 `--trace-entrypoints`/`--impact` (the script does the search, Claude reads only the
-result); for a broad view, it reads `GRAPH_REPORT.md`. It rarely loads
+result); for a broad view, it reads `GRAPH_REPORT.md`; for an open-ended "is this well
+isolated / why does this hold up" question, it calls `--subgraph` (v4.6) and reasons
+over the returned neighborhood itself — citing the script's own computed cut-vertex /
+cycle facts rather than re-deriving them by eye. It rarely loads
 `.codegraph/graph.json` in full, and **never** the source files.
 
 ### Update
@@ -101,6 +105,7 @@ re-parsed, the JSON is refreshed without duplicates.
 /graph snapshot before-refactor  # Named checkpoint of the current graph.json (v4.4)
 /graph diff                # What changed since the last build (v4.4)
 /graph diff before-refactor      # What changed since that named snapshot (v4.4)
+/graph subgraph AuthService --depth 2  # v4.6: bounded neighborhood as JSON for Claude to reason over directly (cut vertices/cycles precomputed) — for open-ended questions --explain/--impact don't reduce to
 ```
 
 ## Architecture
@@ -332,9 +337,15 @@ function, `new X()` → class, resolved import), the content-hash cache key
 (`tests/test_incremental_cache.py`: mtime moved + identical content → served from
 cache), the prod/test `--impact` split (`tests/test_impact_tests.py`: `metadata.role` on
 `file` nodes, `tests_to_run`, a transitively-reached test), and `file → file` edges
-(`tests/test_file_deps.py`). Tests that depend on `tree-sitter`/`ladybug`/
-`python-igraph`+`leidenalg` skip cleanly (`pytest.skip`) if the package isn't installed,
-rather than failing.
+(`tests/test_file_deps.py`); and — v4.6 — the tree-sitter loader / `--doctor`
+(`tests/test_doctor.py`: the loader never crashes on a bad grammar, `--doctor` runs
+touching nothing, a broken grammar is named with a fix) and `--subgraph`'s cut-vertex /
+cycle computation (`tests/test_subgraph.py`: a hand-verified 4-cycle-plus-pendant
+fixture where removing the focus provably splits the neighborhood into 2 components,
+depth bounding, the confidence-filtering default measured against a real 0.35-confidence
+ambiguous call rather than assumed, the node-cap truncation flag). Tests that depend on
+`tree-sitter`/`ladybug`/`python-igraph`+`leidenalg` skip cleanly (`pytest.skip`) if the
+package isn't installed, rather than failing.
 
 ## License
 

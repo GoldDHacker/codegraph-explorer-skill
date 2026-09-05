@@ -1,4 +1,4 @@
-# Graph Schema Reference (v4.5)
+# Graph Schema Reference (v4.6)
 
 This describes the actual shape `codegraph_builder.py` writes to `.codegraph/graph.json`
 — every field below is produced by the current script; nothing here is aspirational.
@@ -150,7 +150,7 @@ Notes:
 ## Graph Object
 ```json
 {
-  "version": "4.5",
+  "version": "4.6",
   "generated_at": "2026-09-01T00:00:00+00:00",
   "project_root": "/path/to/project",
   "stats": {"node_function": 120, "node_class": 45},
@@ -311,3 +311,61 @@ unaffected. A move-aware diff would need to fall back to matching by `(type, nam
 path)` when an exact id match fails, which risks misreporting a genuine add+remove pair
 as a move (two same-named overloads shifting past each other, for instance) — not
 attempted this round specifically to avoid that kind of confidently-wrong match.
+
+## Reasoning subgraph (`--subgraph SYMBOL --depth N --json`, v4.6)
+
+Not a persisted file — printed to stdout only, on demand, never written to
+`.codegraph/`. A different shape from the Graph Object above: this is curated,
+bounded material for Claude to reason over directly (see `SKILL.md`'s Rule 2 bis and
+`query_protocol.md`), not a copy of the full graph.
+
+```json
+{
+  "focus": "AuthService",
+  "focus_id": "class:src/auth.py:AuthService:12",
+  "depth": 2,
+  "min_confidence_applied": 0.5,
+  "node_count": 5,
+  "edge_count": 5,
+  "truncated": false,
+  "max_nodes": 60,
+  "nodes": [
+    {"id": "class:src/auth.py:AuthService:12", "name": "AuthService", "type": "class",
+     "path": "src/auth.py", "depth": 0, "community": "src/auth", "is_cut_vertex": true}
+  ],
+  "edges": [
+    {"source": "PermissionChecker", "source_id": "class:src/auth.py:PermissionChecker:40",
+     "target": "AuthService", "target_id": "class:src/auth.py:AuthService:12",
+     "type": "calls", "tag": "RESOLVED", "confidence": 0.93}
+  ],
+  "cut_vertices": ["AuthService"],
+  "focus_is_cut_vertex": true,
+  "components_if_focus_removed": 2,
+  "cycles_through_focus": [["AuthService", "PermissionChecker", "AuthController"]]
+}
+```
+
+Notes:
+- `nodes`/`edges` are restricted to `calls`/`inherits` only (never `contains` — a
+  file-mate of the focus isn't a structural relationship worth reasoning about here,
+  same exclusion `--impact`/`--trace-entrypoints` already make) and, unless
+  `--include-low-confidence` was passed, exclude `calls` edges below
+  `min_confidence_applied` (default 0.5) — a coincidental name match adds tokens and
+  risk of a wrong conclusion, not signal, for this kind of open-ended reasoning.
+- `truncated: true` means the BFS hit `max_nodes` (default 60) before exhausting
+  `depth` hops — the neighborhood is real but incomplete; a smaller `--depth` or a
+  less-central starting symbol gives a complete one instead. This cap exists because
+  an uncapped query against a genuine hub node in a real 807-node/2012-edge project
+  measured 100 nodes/258 edges and ~104KB of JSON at `--depth 2` — capped at 60 nodes,
+  the same query still measured ~38KB, which is the honest cost of this command, not
+  a rounding error.
+- `cut_vertices`/`focus_is_cut_vertex`/`components_if_focus_removed` come from Tarjan's
+  articulation-point algorithm run **on the extracted subgraph only** — a true
+  statement about this neighborhood's shape, never a whole-project guarantee. The same
+  scoping applies to `cycles_through_focus`: up to 8 example simple cycles (shortest
+  path between each pair of the focus's neighbors, with the focus removed, via BFS),
+  not an exhaustive enumeration of every cycle in the neighborhood.
+- These structural fields are computed facts, not suggestions for Claude to verify by
+  re-reading the node/edge lists — see the "explicit prohibition" in
+  `query_protocol.md` on reconstructing cycles/cut-vertices by eye instead of citing
+  these fields directly.

@@ -1,4 +1,4 @@
-# Extraction Patterns by Language (v4.5)
+# Extraction Patterns by Language (v4.6)
 
 This lists what `scripts/codegraph_builder.py` actually matches today, not an
 aspirational list. Two extraction paths exist: **tree-sitter** (real AST, optional

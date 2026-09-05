@@ -1,4 +1,4 @@
-# Query Protocol — JSON-First (v4.5)
+# Query Protocol — JSON-First (v4.6)
 
 ## Principe
 Toutes les requêtes sont résolues à partir du **graphe**, jamais des sources — mais
@@ -14,7 +14,9 @@ dans le processus Python et n'impriment que le résultat.
 
 1. **Route** : question ciblée (un symbole, une relation entre deux symboles) →
    commande de requête du script ; question large (architecture globale) →
-   `GRAPH_REPORT.md` ; sinon, en dernier recours, `graph.json` complet.
+   `GRAPH_REPORT.md` ; question ouverte/interprétative ("est-ce bien isolé", "pourquoi
+   cette architecture tient", "détecte un problème dans ce coin") → `--subgraph` (v4.6,
+   voir plus bas) ; sinon, en dernier recours, `graph.json` complet.
 2. **Explain** : `python codegraph_builder.py <path> --explain <symbole>` — métadonnées
    + edges entrants/sortants avec confidence, ou une liste de candidats si le nom est
    ambigu (ré-exécuter avec l'id exact affiché).
@@ -195,6 +197,51 @@ signe que le graphe est cassé.
   nœud atteint uniquement via des edges `calls` à faible confidence comme un impact
   certain — le mentionner avec sa confidence, surtout à une profondeur élevée où les
   incertitudes s'accumulent.
+
+#### "Est-ce que X est bien isolé ?" / "Pourquoi cette architecture tient-elle ?" / détection de problème structurel (v4.6)
+Ces questions n'ont pas de réponse pré-calculée par une commande unique — contrairement
+à toutes les commandes ci-dessus, qui sont *la réponse* à une question qui se réduit à
+une seule chose calculée. Ici, l'utile, c'est de la matière brute curée pour raisonner
+dessus, pas un verdict en boîte.
+
+- `--subgraph X --depth 2 --json` : voisinage borné autour de `X` (nœuds + edges
+  `calls`/`inherits` sur N sauts, `contains` exclu). Les edges `calls` à faible
+  confidence (< 0.5 par défaut) sont déjà filtrées — ne pas les redemander avec
+  `--include-low-confidence` sauf raison précise de soupçonner qu'un vrai edge a été
+  écarté.
+- **Protocole de raisonnement — ce qui est déjà calculé, à citer comme un fait, jamais
+  à re-déduire à l'œil** :
+  - `cut_vertices` / `focus_is_cut_vertex` : calculé par l'algorithme de Tarjan (points
+    d'articulation), pas deviné en regardant la liste d'edges. Portée : uniquement au
+    sein du voisinage extrait — un point d'articulation ici veut dire "pas d'autre
+    chemin *dans ce sous-graphe*", pas "pas d'autre chemin nulle part dans le projet".
+    Un `--depth` plus grand peut révéler un chemin que cet appel n'a pas vu.
+  - `components_if_focus_removed` : combien de morceaux le voisinage se scinde si le
+    nœud focus disparaît — ne prend son sens que si `focus_is_cut_vertex` est vrai.
+  - `cycles_through_focus` : jusqu'à 8 cycles simples représentatifs contenant le nœud
+    focus — pas une énumération exhaustive de tous les cycles (exponentiel en général),
+    juste "en voici un, ça prouve qu'il y en a au moins un".
+  - **Interdiction explicite** : ne jamais essayer de repérer un cycle ou un point de
+    coupure "à l'œil" en lisant la liste de nœuds/edges JSON — un LLM qui recompte des
+    arêtes pour reconstituer un cycle se trompe régulièrement au-delà d'une poignée de
+    nœuds. C'est exactement le genre de calcul mécanique que ce skill délègue au script
+    depuis le début (voir `auto_build_protocol.md`) ; `--subgraph` ne change pas cette
+    règle, il l'étend au raisonnement structurel.
+- Ce que Claude apporte, en revanche, c'est l'**interprétation** : mettre en récit les
+  faits calculés + les communautés + les confidences pour répondre à la vraie question.
+  Exemple : `AuthService` a `focus_is_cut_vertex: true`, `components_if_focus_removed: 2`,
+  et l'edge `PaymentGateway -> AuthService` a `confidence: 0.35` (`INFERRED`) → réponse :
+  "AuthService semble isolé : le seul lien avec Payment est une coïncidence de nom
+  probable (confidence 0.35), pas un vrai appel. Si ce lien s'avérait réel, casser
+  AuthService séparerait Payment du reste (2 composantes) — donc l'isolation dépend
+  entièrement de ce point à vérifier." Si un doute subsiste sur un edge précis,
+  ré-exécuter `--explain <id>` dessus pour vérifier le contexte avant de conclure.
+- **Coût, à ne pas sous-estimer** : contrairement aux autres commandes de requête (quelques
+  centaines de tokens), `--subgraph` coûte significativement plus cher — mesuré à ~38 Ko
+  de JSON (même après troncature à 60 nœuds) sur un nœud hub réel d'un projet de 807
+  nœuds/2012 edges. Ne l'utiliser que pour les questions qui le justifient réellement ;
+  pour "qui appelle X" ou "combien de X", les commandes ci-dessus suffisent et coûtent
+  bien moins.
 
 #### Requêtes multi-sauts / agrégations / filtres ad-hoc — Cypher (v4.0)
 - `--cypher "<requête>"` (nécessite `--sync-graphdb` au préalable et `pip install

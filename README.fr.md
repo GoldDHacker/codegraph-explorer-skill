@@ -1,4 +1,4 @@
-# 🧠 CodeGraph Explorer — Script-First (v4.5)
+# 🧠 CodeGraph Explorer — Script-First (v4.6)
 
 *[🇬🇧 English](README.md) · 🇫🇷 Français*
 
@@ -50,9 +50,10 @@ Skill pour Claude Code, inspiré de **Graphify** et **Understand Anything**.
 | Le cache incrémental était indexé sur `mtime` seul : `git checkout`, `git stash pop`, `rsync`, `touch` bougent l'horodatage sans toucher au contenu → tout le projet reparsé pour rien | Clé secondaire par hash de contenu (v4.5) : `.file_cache.json` stocke un `sha` sha256 ; un `mtime` périmé mais un `sha` identique → servi du cache, `mtime` rafraîchi pour la fois d'après. Le hash n'est calculé que sur le chemin lent (mtime déjà différent) — un arbre inchangé ne coûte rien de plus |
 | `--impact X` mélangeait code prod impacté et tests dans une seule liste — impossible de voir d'un coup d'œil « quels tests relancer » | `--impact` séparé prod / test (v4.5, #D) : chaque nœud `file` porte `metadata.role` (`"test"` si segment de dossier `tests/`/`spec/`/… ou nom `test_*.py`/`*_test.go`/`*.test.ts`/… , sinon `"prod"`) ; `--impact` sort la liste détaillée en prod seul + un champ `tests_to_run` listant les fichiers de test qui exercent transitivement le symbole modifié |
 | « Quel fichier dépend de quel fichier ? » obligeait à parcourir des milliers de nœuds `function` | Edges `file → file` agrégés (v4.5, #C) : les edges `calls`/`inherits` sont repliés en une arête pondérée par paire (fichier source → fichier cible), stockées à part dans `graph.json["file_deps"]` (pas mélangées aux `edges`). Commande `--file-deps [FICHIER|SYMBOLE]` — dépendances entrantes/sortantes d'un fichier, ou la liste complète triée par poids. Lookup sur ~quelques centaines d'entrées, instantané |
-| Une grammaire installée mais d'ABI incompatible avec le cœur tree-sitter (`ValueError: Incompatible Language version 15`) faisait soit planter tout le script à l'import, soit basculer ce langage en regex sans rien dire — « moins précis que documenté » de façon invisible | Chargement robuste des grammaires (v4.5) : une boucle attrape toute erreur de chargement, teste par un parse d'un octet, enregistre l'échec dans `TREE_SITTER_LOAD_ERRORS`, et continue en regex pour ce langage. Chaque build affiche une ligne `[!]` nommant les langages touchés ; nouveau flag `--doctor` qui imprime l'état complet du moteur + la ligne `pip` vérifiée. Cœur borné `>=0.25,<0.26` — la seule ligne qui charge les grammaires ABI-15 actuelles *et* ne segfault pas (0.26.0 si) |
+| Une grammaire installée mais d'ABI incompatible avec le cœur tree-sitter (`ValueError: Incompatible Language version 15`) faisait soit planter tout le script à l'import, soit basculer ce langage en regex sans rien dire — « moins précis que documenté » de façon invisible | Chargement robuste des grammaires (v4.6) : une boucle attrape toute erreur de chargement, teste par un parse d'un octet, enregistre l'échec dans `TREE_SITTER_LOAD_ERRORS`, et continue en regex pour ce langage. Chaque build affiche une ligne `[!]` nommant les langages touchés ; nouveau flag `--doctor` qui imprime l'état complet du moteur + la ligne `pip` vérifiée. Cœur borné `>=0.25,<0.26` — la seule ligne qui charge les grammaires ABI-15 actuelles *et* ne segfault pas (0.26.0 si) |
+| `--explain`/`--callers`/`--impact` sont *la réponse* à une question qui se réduit à une chose précalculée — mais « mon auth est-elle bien isolée ? », « pourquoi cette archi tient ? », « quelle est la forme de ce cluster ? » ne se réduisent à aucun flag ; Claude ne pouvait que lire les sources ou deviner | Sous-graphe de raisonnement (v4.6, « Phase 6 ») : `--subgraph SYMBOLE --depth N --json` renvoie un voisinage borné (nœuds + edges `calls`/`inherits`, plafonné à 60 nœuds, `"truncated": true` si atteint) comme matière brute pour que Claude raisonne dessus. Les propriétés structurelles **exactes** — points de coupure (Tarjan), `components_if_focus_removed`, cycles passant par le focus — sont calculées par le script et livrées en champs, jamais laissées à l'œil d'un LLM sur une liste d'arêtes. Edges `calls` faibles filtrés par un défaut `--min-confidence` (0.5), pas une consigne en prose. Mesuré ~38 Ko de JSON sur une requête hub réelle de 807 nœuds — nettement plus cher qu'un `--callers`, d'où une règle de routage (`pourquoi/comment → subgraph`, `qui/combien/quel chemin → les commandes existantes`) |
 
-Le détail complet des bugs trouvés et corrigés est dans `SKILL.md` (§ "What changed in v3" … "What changed in v4.5").
+Le détail complet des bugs trouvés et corrigés est dans `SKILL.md` (§ "What changed in v3" … "What changed in v4.6").
 
 ## 🚀 Installation
 
@@ -73,7 +74,10 @@ Graph built. 1247 nodes, 3892 edges.
 ### Questions architecture
 Pour une question ciblée, Claude appelle `--explain`/`--callers`/`--find-path`/
 `--trace-entrypoints`/`--impact` (le script fait la recherche, Claude ne lit que le
-résultat) ; pour une vue d'ensemble, il lit `GRAPH_REPORT.md`. Il ne charge
+résultat) ; pour une vue d'ensemble, il lit `GRAPH_REPORT.md` ; pour une question
+ouverte (« est-ce bien isolé », « pourquoi ça tient »), il appelle `--subgraph` (v4.6)
+et raisonne lui-même sur le voisinage retourné — en citant les points de coupure /
+cycles déjà calculés par le script, jamais en les redevinant à l'œil. Il ne charge
 `.codegraph/graph.json` en entier que rarement, et **jamais** les fichiers sources.
 
 ### Mise à jour
@@ -101,6 +105,7 @@ modifiés sont reparsés, le JSON est rafraîchi sans doublons.
 /graph snapshot before-refactor  # Checkpoint nommé du graph.json actuel (v4.4)
 /graph diff                # Ce qui a changé depuis le dernier build (v4.4)
 /graph diff before-refactor      # Ce qui a changé depuis ce snapshot nommé (v4.4)
+/graph subgraph AuthService --depth 2  # v4.6 : voisinage borné en JSON pour que Claude raisonne dessus (points de coupure/cycles précalculés) — pour les questions ouvertes que --explain/--impact ne couvrent pas
 ```
 
 ## Architecture
@@ -362,9 +367,16 @@ la clé de cache par hash de contenu (`tests/test_incremental_cache.py` : `mtime
 (`tests/test_impact_tests.py` : `metadata.role` sur les nœuds `file`, `tests_to_run`,
 test atteint transitivement), et les edges `file → file`
 (`tests/test_file_deps.py` : agrégation pondérée, absence dans `edges`, requête par
-fichier et par symbole, liste projet triée par poids). Les tests qui dépendent de `tree-sitter`/`ladybug`/
-`python-igraph`+`leidenalg` se sautent proprement (`pytest.skip`) si le paquet
-correspondant n'est pas installé, plutôt que d'échouer.
+fichier et par symbole, liste projet triée par poids) ; et — v4.6 — le loader
+tree-sitter / `--doctor` (`tests/test_doctor.py` : le loader ne plante jamais sur une
+grammaire cassée, `--doctor` tourne sans rien toucher, une grammaire incompatible est
+nommée avec le correctif) et le calcul points de coupure / cycles de `--subgraph`
+(`tests/test_subgraph.py` : un fixture cycle+pendant vérifié à la main où retirer le
+focus scinde bien le voisinage en 2 composantes, la limite de profondeur, le filtrage
+par confidence par défaut mesuré sur un vrai appel ambigu à 0.35 plutôt que supposé, et
+le plafond de nœuds avec troncature signalée). Les tests qui dépendent de
+`tree-sitter`/`ladybug`/`python-igraph`+`leidenalg` se sautent proprement (`pytest.skip`)
+si le paquet correspondant n'est pas installé, plutôt que d'échouer.
 
 ## License
 

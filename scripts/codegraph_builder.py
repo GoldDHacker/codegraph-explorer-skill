@@ -120,7 +120,7 @@ from datetime import datetime, timezone
 from fnmatch import fnmatch
 
 # == Configuration ============================================================
-VERSION = "4.5"
+VERSION = "4.6"
 GRAPH_DIR = ".codegraph"
 GRAPH_FILE = "graph.json"
 CACHE_FILE = ".file_cache.json"
@@ -3335,6 +3335,274 @@ class GraphBuilder:
         if not incoming:
             print("    (nothing detected)")
 
+    # -- reasoning subgraph (v4.6 Phase 6) --------------------------------------
+    # These three helpers are plain graph-theory algorithms (Tarjan's articulation
+    # points, a bounded simple-cycle finder, connected-component counting), each
+    # O(V+E) or close to it on the *extracted subgraph*, never the whole project
+    # graph. They exist so cmd_subgraph can hand Claude computed structural facts
+    # (is this a cut vertex, is there a cycle here) instead of asking Claude to
+    # eyeball a JSON blob and reconstruct graph theory by reading -- an LLM
+    # miscounting edges while hunting for a cycle by eye is a real, well-known
+    # failure mode past a handful of nodes, and doing it this way costs strictly
+    # fewer tokens too, not more accuracy for more tokens.
+    @staticmethod
+    def _articulation_points(node_ids, adj):
+        """Tarjan's articulation-point algorithm, textbook form, over an undirected
+        adjacency map restricted to `node_ids`. Returns the set of node ids whose
+        removal would increase the number of connected components of this graph.
+        IMPORTANT SCOPING: `adj` here is the *extracted subgraph's* adjacency, built
+        from a depth-bounded BFS -- a node flagged as a cut vertex has no other path
+        within this neighborhood, not "no other path exists anywhere in the project".
+        A larger --depth can reveal a path this call couldn't see."""
+        disc, low, parent = {}, {}, {}
+        ap = set()
+        timer = [0]
+
+        def dfs(u):
+            children = 0
+            disc[u] = low[u] = timer[0]
+            timer[0] += 1
+            for v in adj.get(u, ()):
+                if v not in node_ids:
+                    continue
+                if v not in disc:
+                    parent[v] = u
+                    children += 1
+                    dfs(v)
+                    low[u] = min(low[u], low[v])
+                    if parent.get(u) is not None and low[v] >= disc[u]:
+                        ap.add(u)
+                elif v != parent.get(u):
+                    low[u] = min(low[u], disc[v])
+            if parent.get(u) is None and children > 1:
+                ap.add(u)
+
+        for n in node_ids:
+            if n not in disc:
+                dfs(n)
+        return ap
+
+    @staticmethod
+    def _components_excluding(node_ids, adj, exclude):
+        """Connected-component count of the subgraph induced on `node_ids - {exclude}`.
+        The extracted neighborhood is always a single component before removal (it was
+        built by BFS from one root), so a result > 1 means `exclude` is a cut vertex
+        *of this neighborhood* -- same scoping caveat as _articulation_points."""
+        remaining = set(node_ids) - {exclude}
+        seen = set()
+        count = 0
+        for n in remaining:
+            if n in seen:
+                continue
+            count += 1
+            stack = [n]
+            seen.add(n)
+            while stack:
+                cur = stack.pop()
+                for nxt in adj.get(cur, ()):
+                    if nxt in remaining and nxt not in seen:
+                        seen.add(nxt)
+                        stack.append(nxt)
+        return count
+
+    @staticmethod
+    def _cycles_through(focus, node_ids, adj, limit=8, max_len=8):
+        """Up to `limit` simple cycles that contain `focus`, each capped at `max_len`
+        nodes. For every pair of focus's neighbors (a, b), BFS the shortest path from
+        a to b in the subgraph with focus removed; if one exists, focus-a-...-b-focus
+        is a simple cycle. This is NOT exhaustive cycle enumeration (that's exponential
+        in general) -- it's one representative (the shortest) cycle per neighbor pair,
+        enough to answer "does X sit on a cycle, show me one" without trying to
+        enumerate every cycle in a graph that could have many."""
+        neighbors = sorted(adj.get(focus, ()))
+        others = set(node_ids) - {focus}
+        found, seen = [], set()
+        for i, a in enumerate(neighbors):
+            for b in neighbors[i + 1:]:
+                if a == b or a not in others or b not in others:
+                    continue
+                prev = {a: None}
+                queue = deque([a])
+                while queue:
+                    cur = queue.popleft()
+                    if cur == b:
+                        break
+                    for nxt in adj.get(cur, ()):
+                        if nxt == focus or nxt not in others or nxt in prev:
+                            continue
+                        prev[nxt] = cur
+                        queue.append(nxt)
+                if b not in prev:
+                    continue
+                path, cur = [b], b
+                while prev[cur] is not None:
+                    cur = prev[cur]
+                    path.append(cur)
+                path.reverse()  # a -> ... -> b
+                cycle = [focus] + path
+                if len(cycle) > max_len:
+                    continue
+                key = frozenset(cycle)
+                if key in seen:
+                    continue
+                seen.add(key)
+                found.append(cycle)
+                if len(found) >= limit:
+                    return found
+        return found
+
+    def cmd_subgraph(self, needle, depth=2, as_json=False, min_confidence=0.5,
+                      include_low_confidence=False, max_nodes=60):
+        """--subgraph SYMBOL --depth N [--json] [--min-confidence F | --include-low-
+        confidence]: extract a bounded neighborhood around SYMBOL as structured data
+        for Claude to reason over directly, instead of a pre-formatted verdict.
+
+        --explain/--callers/--impact are the *answer* to a question that reduces to
+        one precomputed thing. This command is for the questions that don't -- "is
+        this well isolated", "why does this design hold up", "what's the shape of
+        this cluster" -- where the useful output is curated raw material, not a
+        canned metric. See references/query_protocol.md's routing rule for when to
+        reach for this instead of the other query commands.
+
+        To keep that reasoning grounded rather than a guess, the script itself
+        precomputes, over the extracted neighborhood only:
+          - cut vertices (Tarjan's algorithm) and whether the focus node is one
+          - up to 8 example simple cycles that pass through the focus node
+          - how many pieces the neighborhood would split into if the focus were removed
+        None of this is exhaustive whole-project graph theory (see the scoping note
+        in _articulation_points) -- it describes the shape of *this* neighborhood.
+
+        Low-confidence `calls` edges (< min_confidence, default 0.5) are excluded by
+        default: a name shared by unrelated symbols is rarely useful material for
+        architectural reasoning, it's just noise that costs tokens and can mislead.
+        Pass --include-low-confidence to see them anyway.
+
+        Hard-capped at `max_nodes` (default 60), BFS order (closest hops first): this
+        was NOT a guessed number -- a real run against a genuine hub class in a
+        207-file/2012-edge project (degree 42, --depth 2) came back at 100 nodes/258
+        edges and ~104KB of JSON, i.e. tens of thousands of tokens for one call, which
+        defeats the entire point of this command versus reading graph.json directly.
+        A truncated result says so explicitly (`"truncated": true`) rather than
+        silently describing a smaller neighborhood than the one actually reachable --
+        narrow --depth or start from a less central symbol if you hit this."""
+        matches = self._find_nodes(needle)
+        if not matches:
+            print(f"No node matches '{needle}'.")
+            return
+        if len(matches) > 1:
+            if as_json:
+                print(json.dumps({"ambiguous": [n["id"] for n in matches]}, indent=2))
+            else:
+                self._resolve_ambiguous(needle, matches)
+            return
+        focus = matches[0]
+        start = focus["id"]
+        idx = {nd["id"]: nd for nd in self.nodes}
+
+        def edge_ok(e):
+            if e["type"] not in ("calls", "inherits"):
+                return False  # `contains` excluded: a file-mate isn't a structural
+                               # relationship, same rationale as --impact/--trace-entrypoints
+            if e["type"] == "calls" and not include_low_confidence and e["confidence"] < min_confidence:
+                return False
+            return True
+
+        adj = defaultdict(list)
+        kept_edges = []
+        for e in self.edges:
+            if edge_ok(e):
+                adj[e["source"]].append(e["target"])
+                adj[e["target"]].append(e["source"])
+                kept_edges.append(e)
+
+        dist = {start: 0}
+        order = [start]
+        visited = {start}
+        queue = deque([start])
+        truncated = False
+        while queue:
+            cur = queue.popleft()
+            d = dist[cur]
+            if d >= depth:
+                continue
+            for nxt in adj.get(cur, ()):
+                if nxt in visited:
+                    continue
+                if len(visited) >= max_nodes:
+                    truncated = True
+                    continue
+                visited.add(nxt)
+                dist[nxt] = d + 1
+                order.append(nxt)
+                queue.append(nxt)
+
+        sub_edges = [e for e in kept_edges if e["source"] in visited and e["target"] in visited]
+        sub_adj = defaultdict(set)
+        for e in sub_edges:
+            sub_adj[e["source"]].add(e["target"])
+            sub_adj[e["target"]].add(e["source"])
+
+        cut_vertices = self._articulation_points(visited, sub_adj)
+        components_if_removed = self._components_excluding(visited, sub_adj, start)
+        cycles = self._cycles_through(start, visited, sub_adj)
+
+        nodes_out = [{
+            "id": nid, "name": idx[nid]["name"], "type": idx[nid]["type"], "path": idx[nid]["path"],
+            "depth": dist[nid], "community": self._community_name(idx[nid].get("community")),
+            "is_cut_vertex": nid in cut_vertices,
+        } for nid in order if nid in idx]
+
+        edges_out = [{
+            "source": idx[e["source"]]["name"] if e["source"] in idx else e["source"],
+            "source_id": e["source"],
+            "target": idx[e["target"]]["name"] if e["target"] in idx else e["target"],
+            "target_id": e["target"],
+            "type": e["type"], "tag": e["tag"], "confidence": e["confidence"],
+        } for e in sub_edges]
+
+        result = {
+            "focus": focus["name"], "focus_id": start, "depth": depth,
+            "min_confidence_applied": None if include_low_confidence else min_confidence,
+            "node_count": len(nodes_out), "edge_count": len(edges_out),
+            "truncated": truncated, "max_nodes": max_nodes,
+            "nodes": nodes_out, "edges": edges_out,
+            "cut_vertices": sorted({idx[i]["name"] for i in cut_vertices if i in idx}),
+            "focus_is_cut_vertex": start in cut_vertices,
+            "components_if_focus_removed": components_if_removed,
+            "cycles_through_focus": [[idx[i]["name"] for i in cyc if i in idx] for cyc in cycles],
+        }
+
+        if as_json:
+            print(json.dumps(result, indent=2))
+            return
+
+        print(f"Subgraph around {focus['name']} (depth {depth}, min_confidence="
+              f"{'none' if include_low_confidence else min_confidence}): "
+              f"{len(nodes_out)} nodes, {len(edges_out)} edges"
+              + (f"  [TRUNCATED at {max_nodes} nodes -- narrow --depth or start from a "
+                 f"less central symbol for the full neighborhood]" if truncated else ""))
+        print(f"  focus is cut vertex: {result['focus_is_cut_vertex']}"
+              + (f"  (removing it splits the neighborhood into {components_if_removed} pieces)"
+                 if result['focus_is_cut_vertex'] else ""))
+        if result["cut_vertices"]:
+            print(f"  other cut vertices in this neighborhood: {', '.join(result['cut_vertices'])}")
+        if result["cycles_through_focus"]:
+            print(f"  {len(result['cycles_through_focus'])} example cycle(s) through {focus['name']}:")
+            for cyc in result["cycles_through_focus"]:
+                print(f"    {' -> '.join(cyc)} -> {cyc[0]}")
+        else:
+            print("  no cycle through the focus node found in this neighborhood")
+        print("  nodes:")
+        for nd in nodes_out:
+            tag = "  [CUT VERTEX]" if nd["is_cut_vertex"] else ""
+            print(f"    [depth {nd['depth']}] {nd['name']} ({nd['type']}, {nd['path']}, "
+                  f"community: {nd['community']}){tag}")
+        print("  edges:")
+        for e in sorted(edges_out, key=lambda x: -x["confidence"]):
+            print(f"    {e['source']} --[{e['type']}/{e['tag']}"
+                  + (f", conf={e['confidence']}" if e["type"] == "calls" else "")
+                  + f"]--> {e['target']}")
+
     # -- graph versioning / diff (v4.4 Phase 5) --------------------------------
     def _load_graph_file(self, path: Path):
         if not path.exists():
@@ -4324,6 +4592,27 @@ def main():
                               "what that file depends on and what depends on it. With no "
                               "argument: the whole project's file-dependency list, heaviest "
                               "first")
+    parser.add_argument("--subgraph", metavar="SYMBOL",
+                         help="Query (v4.6): extract SYMBOL's neighborhood (nodes+edges, "
+                              "depth-bounded) as structured data for Claude to reason over "
+                              "directly -- cut vertices, cycles, and component counts are "
+                              "precomputed by the script, not left for Claude to eyeball. "
+                              "For open-ended 'why/how is this shaped' questions; use "
+                              "--explain/--callers/--impact instead for a targeted question "
+                              "that already has a canned answer")
+    parser.add_argument("--depth", type=int, default=2, metavar="N",
+                         help="With --subgraph: BFS hop radius around SYMBOL (default 2)")
+    parser.add_argument("--min-confidence", type=float, default=0.5, metavar="F",
+                         help="With --subgraph: exclude 'calls' edges below this confidence "
+                              "(default 0.5). Ignored if --include-low-confidence is set")
+    parser.add_argument("--include-low-confidence", action="store_true",
+                         help="With --subgraph: include low-confidence 'calls' edges instead "
+                              "of filtering them out")
+    parser.add_argument("--max-nodes", type=int, default=60, metavar="N",
+                         help="With --subgraph: hard cap on nodes returned (default 60, BFS "
+                              "order). A real 807-node/2012-edge project measured ~104KB of "
+                              "JSON for one uncapped hub-node query -- this cap is what keeps "
+                              "the command's token cost bounded and predictable")
     parser.add_argument("--snapshot", metavar="NAME",
                          help="Save the current .codegraph/graph.json as a named snapshot "
                               "(.codegraph/snapshots/NAME.json) to diff against later with "
@@ -4359,7 +4648,7 @@ def main():
         # shouldn't require) load_existing() to succeed first.
         builder.cmd_cypher(args.cypher, as_json=args.json)
     elif (args.explain or args.callers or args.find_path or args.trace_entrypoints
-          or args.impact or args.file_deps is not None):
+          or args.impact or args.file_deps is not None or args.subgraph):
         if not builder.load_existing():
             log("[!] no .codegraph/graph.json yet -- run a build first (no flags, or --update).")
             sys.exit(1)
@@ -4375,6 +4664,11 @@ def main():
             builder.cmd_impact(args.impact, as_json=args.json)
         if args.file_deps is not None:
             builder.cmd_file_deps(None if args.file_deps == "__ALL__" else args.file_deps, as_json=args.json)
+        if args.subgraph:
+            builder.cmd_subgraph(args.subgraph, depth=args.depth, as_json=args.json,
+                                  min_confidence=args.min_confidence,
+                                  include_low_confidence=args.include_low_confidence,
+                                  max_nodes=args.max_nodes)
     elif args.snapshot:
         builder.cmd_snapshot(args.snapshot)
     elif args.diff is not None:
