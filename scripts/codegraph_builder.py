@@ -80,6 +80,17 @@ Design notes (read this before changing extraction logic):
     a big precision improvement over scanning the whole file, which used to attribute
     every symbol referenced anywhere in a file to every function in that file.
 
+  * v4.9: `calls`-edge resolution gained a workspace-package tier (2.5, between the
+    filesystem-verified-import tier and the ambiguity-scored INFERRED tier). A bare JS/
+    TS specifier that matches a sibling workspace package's `name` (from
+    pnpm-workspace.yaml / a root package.json `workspaces`) resolves to that package's
+    own source tree -- `resolved_by: "workspace_import"`, confidence 0.9. On a monorepo
+    where packages import each other by name this is most cross-package call edges,
+    which were `INFERRED` at ~0.2-0.55 before. Directory-scoped, not single-file: re-
+    exports through a package entrypoint aren't tracked as edges, so the export can be
+    in any file of the package. No-op when the root isn't a workspace. See
+    _resolve_workspace_import().
+
   * v4.8: discovery (discover(), load_gitignore_tree(), poll_mode()) walks the tree with
     os.walk via _walk_pruned() and drops SKIP_DIRS / dot-directories from `dirnames`
     *in place*, so descent stops at the directory boundary. Path.rglob() walked the
@@ -129,7 +140,7 @@ from datetime import datetime, timezone
 from fnmatch import fnmatch
 
 # == Configuration ============================================================
-VERSION = "4.8"
+VERSION = "4.9"
 GRAPH_DIR = ".codegraph"
 GRAPH_FILE = "graph.json"
 CACHE_FILE = ".file_cache.json"
@@ -2023,6 +2034,92 @@ class GraphBuilder:
 
         return results
 
+    # -- workspace-package import resolution (v4.9) --------------------------
+    # The tier above deliberately gives up on a *bare* JS/TS specifier ("lodash",
+    # "@scope/pkg") because resolving one needs build-tool metadata. But there is one
+    # bare-specifier case where the metadata is right there and unambiguous: a monorepo
+    # where the specifier is the `name` of a sibling workspace package. `pnpm-workspace.
+    # yaml` (or a root package.json `workspaces`) lists the member globs; each member's
+    # package.json `name` maps that specifier to exactly one directory. So
+    # `import { CronDaemon } from '@deepseek-ai/dsh-cron'` resolves to *that package's
+    # own source tree* -- not to a single file, because re-exports through the package
+    # entrypoint (`export * from './daemon.ts'`) aren't tracked as edges, so the symbol
+    # can be defined in any file of the package. Package-directory scoping still turns
+    # "one of N same-named symbols anywhere in the repo" into "the one in the package
+    # this file actually imports from", which on a real monorepo is most cross-package
+    # call edges. Subpath specifiers (`@scope/pkg/sub`) resolve to the package too:
+    # narrowing to the subpath file would need the `exports` map, which is exactly the
+    # metadata this stays clear of guessing at.
+    def _workspace_globs(self):
+        globs = []
+        pnpm = self.root / 'pnpm-workspace.yaml'
+        if pnpm.is_file():
+            try:
+                txt = pnpm.read_text(encoding='utf-8')
+            except OSError:
+                txt = ''
+            in_packages = False
+            for raw in txt.splitlines():
+                if re.match(r'^packages:\s*(#.*)?$', raw):
+                    in_packages = True
+                    continue
+                if in_packages:
+                    m = re.match(r'^\s+-\s+(?P<q>["\']?)(.+?)(?P=q)\s*(?:#.*)?$', raw)
+                    if m:
+                        globs.append(m.group(2).strip())
+                    elif raw.strip() and not raw[:1].isspace():
+                        in_packages = False  # dedented back to a top-level key
+        pj = self.root / 'package.json'
+        if pj.is_file():
+            try:
+                data = json.loads(pj.read_text(encoding='utf-8'))
+            except (OSError, ValueError):
+                data = {}
+            ws = data.get('workspaces')
+            if isinstance(ws, dict):
+                ws = ws.get('packages')
+            if isinstance(ws, list):
+                globs.extend(w for w in ws if isinstance(w, str))
+        return [g for g in globs if g and not g.startswith('!')]
+
+    def _workspace_package_map(self):
+        """{workspace package name -> its directory, rel to root, posix}. Empty (this
+        tier becomes a no-op) when the root is not a workspace. Recomputed per build --
+        a few hundred package.json reads, negligible next to source parsing."""
+        result = {}
+        for g in self._workspace_globs():
+            try:
+                matches = list(self.root.glob(g))
+            except (OSError, ValueError):
+                continue
+            for d in matches:
+                pj = d / 'package.json'
+                if not d.is_dir() or not pj.is_file():
+                    continue
+                try:
+                    data = json.loads(pj.read_text(encoding='utf-8'))
+                except (OSError, ValueError):
+                    continue
+                nm = data.get('name')
+                if isinstance(nm, str) and nm:
+                    result.setdefault(nm, d.resolve().relative_to(self.root).as_posix())
+        return result
+
+    def _resolve_workspace_import(self, caller_rel: str, import_name: str, pkg_map: dict,
+                                  pkg_files: dict) -> set:
+        if not import_name or import_name.startswith('.'):
+            return set()
+        if Path(caller_rel).suffix.lower() not in ('.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs'):
+            return set()
+        name = import_name
+        if name not in pkg_map:
+            parts = name.split('/')
+            head = '/'.join(parts[:2]) if name.startswith('@') else parts[0]
+            name = head if head in pkg_map else None
+        if not name:
+            return set()
+        return set(pkg_files.get(pkg_map[name], ()))
+
     # -- cross-reference resolution ("calls" edges) --------------------------
     # Two sources of call sites feed one shared resolver (resolve_one below):
     #   1. AST call sites (self.ast_callsites) -- for languages whose tree-sitter walk
@@ -2081,6 +2178,29 @@ class GraphBuilder:
             if resolved:
                 file_resolved_imports[node["path"]].update(resolved)
 
+        # v4.9: workspace-package import resolution -- see _resolve_workspace_import
+        # above. `pkg_files` buckets every discovered file under the longest workspace
+        # package dir that is a path prefix of it, so a nested member (e.g.
+        # native/landlock-run/packages/x inside native/landlock-run) wins over its
+        # parent. `file_ws_resolved_imports[caller] = {files of every workspace package
+        # that caller imports by name}` feeds tier 2.5 in resolve_one.
+        ws_pkg_map = self._workspace_package_map()
+        file_ws_resolved_imports = defaultdict(set)
+        if ws_pkg_map:
+            ordered_dirs = sorted(set(ws_pkg_map.values()), key=len, reverse=True)
+            pkg_files = {}
+            for f in all_file_rels:
+                for d in ordered_dirs:
+                    if f == d or f.startswith(d + '/'):
+                        pkg_files.setdefault(d, set()).add(f)
+                        break
+            for node in self.nodes:
+                if node["type"] != "import":
+                    continue
+                got = self._resolve_workspace_import(node["path"], node["name"], ws_pkg_map, pkg_files)
+                if got:
+                    file_ws_resolved_imports[node["path"]].update(got)
+
         # ---- one call site -> zero-or-more "calls" edges. Shared by the AST-callsite
         #      path and the regex body-scan fallback so the tier logic (same-class via
         #      `this`, same-file, filesystem-verified import, ambiguity-scored INFERRED)
@@ -2138,6 +2258,23 @@ class GraphBuilder:
                     return
                 if import_matches:
                     others = import_matches
+
+            # tier 2.5 (v4.9): workspace-package import resolution. The caller imports a
+            # bare specifier that is a sibling workspace package's `name`; scope the
+            # candidates to that package's own source tree. One match in the package ->
+            # that's the export (0.9, a touch under tier 2's 0.93 because this is
+            # directory-scoped, not a single verified file -- re-exports through the
+            # package entrypoint aren't followed). >1 -> narrow the INFERRED set to the
+            # package rather than the whole repo.
+            ws_files = file_ws_resolved_imports.get(rel)
+            if ws_files:
+                ws_matches = [tid for tid in others if (self.get_node(tid) or {}).get("path") in ws_files]
+                if len(ws_matches) == 1:
+                    self._add_unique_edge(cid, ws_matches[0], "calls", "RESOLVED", 0.9,
+                                           {"resolved_by": "workspace_import"})
+                    return
+                if ws_matches:
+                    others = ws_matches
 
             # tier 3: ambiguity-scored INFERRED. Confidence reflects how many unrelated
             # symbols share the name project-wide (a unique `chargeCard` is near-certain;

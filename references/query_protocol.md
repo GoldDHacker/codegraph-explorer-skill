@@ -114,6 +114,15 @@ candidats, que l'appel vise un symbole précis :
   n'ont pas cette résolution vérifiée (leurs chemins d'import ont besoin de métadonnées
   d'outillage — `go.mod`, un classpath, `composer.json`, un chemin d'include — que le
   script ne parse pas) ; ils restent sur le signal plus faible ci-dessous.
+- `metadata.resolved_by: "workspace_import"` (confidence `0.9`, v4.9) : dans un monorepo,
+  l'appelant importe un specifier **bare** (`@scope/pkg`) qui est le `name` d'un paquet
+  workspace voisin (lu depuis `pnpm-workspace.yaml` ou un `workspaces` de package.json
+  racine), et exactement un candidat du nom appelé est défini dans l'arborescence source
+  de **ce paquet**. Portée au dossier du paquet, pas à un fichier unique — les
+  ré-exports via l'entrypoint (`export * from './x'`) ne sont pas suivis comme des edges
+  — d'où `0.9`, un cran sous `import`. No-op hors monorepo. Un import sous-chemin
+  (`@scope/pkg/sub`) résout vers le paquet aussi (le narrowing au fichier `sub`
+  demanderait la table `exports`, que le script ne devine pas).
 
 Aucun n'atteint `1.0` : même sur l'arbre de syntaxe JS/TS, la résolution reste un
 appariement de noms et un test de chemin, pas une vraie résolution de portée (un nom

@@ -1,4 +1,4 @@
-# 🧠 CodeGraph Explorer — Script-First (v4.8)
+# 🧠 CodeGraph Explorer — Script-First (v4.9)
 
 *[🇬🇧 English](README.md) · 🇫🇷 Français*
 
@@ -55,7 +55,9 @@ Skill pour Claude Code, inspiré de **Graphify** et **Understand Anything**.
 | Le skill était écrit comme « répondre aux *questions* d'archi depuis le graphe », donc il ne se déclenchait que sur une question. Quand on demandait à Claude d'*implémenter* ou *corriger* quelque chose, il explorait à l'ancienne — des dizaines d'allers-retours grep/glob/lecture de fichiers — sans jamais engager le graphe | Déclencheur élargi + un hook (v4.7). La `description` de `SKILL.md`, la Règle 1 et une nouvelle **Règle 1 bis** disent désormais : construire/rafraîchir le graphe **au début de toute tâche de code** dans un repo établi, et requêter le graphe **avant** `grep` pour tout ce qui est relationnel (appelants, dépendants, chemins, entry points, tests impactés). Nouveau `scripts/codegraph_session_hook.py` : se câble en hook `SessionStart` de Claude Code (ou en hook git `post-checkout`) et construit un graphe absent, ou `--update` un graphe périmé, dans un **processus détaché en arrière-plan** qui ne bloque jamais la session — donc `.codegraph/graph.json` est déjà là. Opt-out : `CODEGRAPH_AUTOBUILD=0`. Setup : `references/hook_setup.md`. 8 nouveaux tests (`tests/test_session_hook.py`) |
 | La découverte utilisait `Path.rglob()`, qui parcourt tout le sous-arbre avant qu'aucun filtre de skip ne s'exécute — sur un monorepo qui vendorise ses dépendances (`node_modules/` profondément imbriqués de pnpm, un lien symbolique de dossier auto-référent), il levait `OSError [WinError 1921]` / « too many levels of symbolic links » et le build mourait avec 0 fichier | Parcours avec `os.walk()` et élagage de `SKIP_DIRS`/dossiers-point dans `dirnames` sur place (v4.8, `_walk_pruned()`) : la descente s'arrête à la frontière, le cycle de symlink n'est jamais atteint, `followlinks=False`. Mêmes fichiers découverts qu'avant — seul le crash anticipé disparaît. 4 nouveaux tests (`tests/test_discovery_pruning.py`) |
 
-Le détail complet des bugs trouvés et corrigés est dans `SKILL.md` (§ "What changed in v3" … "What changed in v4.8").
+| Sur un monorepo, `import { x } from '@scope/pkg'` (specifier bare — la plupart des appels inter-paquets) ne résolvait jamais : le tier import vérifié ne gère que les chemins relatifs, donc ces appels tombaient dans l'heuristique INFERRED projet-large, éclatés sur tous les symboles homonymes du dépôt | Tier paquet-workspace (**v4.9**, tier 2.5) : un specifier bare qui matche le `name` d'un paquet workspace voisin (depuis `pnpm-workspace.yaml` / un `workspaces` de package.json racine) résout vers l'arborescence source de ce paquet — `RESOLVED`, `resolved_by: "workspace_import"`, 0.9. Mesuré sur un vrai monorepo pnpm de 311 paquets : 4 670 edges inter-paquets passés en `RESOLVED`, ~90k edges INFERRED éclatés effondrés. No-op hors workspace. 5 nouveaux tests (`tests/test_workspace_resolution.py`) |
+
+Le détail complet des bugs trouvés et corrigés est dans `SKILL.md` (§ "What changed in v3" … "What changed in v4.9").
 
 ## 🚀 Installation
 

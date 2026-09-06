@@ -1,4 +1,4 @@
-# 🧠 CodeGraph Explorer — Script-First (v4.8)
+# 🧠 CodeGraph Explorer — Script-First (v4.9)
 
 *🇬🇧 English · [🇫🇷 Français](README.fr.md)*
 
@@ -55,7 +55,9 @@ A skill for Claude Code, inspired by **Graphify** and **Understand Anything**.
 | The skill was written as "answer architecture *questions* from the graph", so it only fired on a question. Asked to *implement* or *fix* something, Claude explored the old way — dozens of grep/glob/file-read round trips — and never engaged the graph | Trigger widened + a hook (v4.7). `SKILL.md`'s `description`, Rule 1, and a new **Rule 1 bis** now say: build/refresh the graph at the **start of any coding task** in an established repo, and query the graph **before** `grep` for anything relational (callers, dependents, paths, entry points, impacted tests). New `scripts/codegraph_session_hook.py` wires as a Claude Code `SessionStart` hook (or a git `post-checkout` hook): it builds a missing graph, or `--update`s a stale one, in a **detached background process** that never blocks the session — so `.codegraph/graph.json` is simply already there. Opt out with `CODEGRAPH_AUTOBUILD=0`. Setup: `references/hook_setup.md`. 8 new tests (`tests/test_session_hook.py`) |
 | Discovery used `Path.rglob()`, which walks the whole subtree before any skip filter runs — on a monorepo that vendors its deps (pnpm's deeply nested `node_modules/`, a self-referential directory symlink) it raised `OSError [WinError 1921]` / "too many levels of symbolic links" and the build died with 0 files | Walk with `os.walk()` and prune `SKIP_DIRS`/dot-directories from `dirnames` in place (v4.8, `_walk_pruned()`): descent stops at the boundary, the symlink cycle is never reached, `followlinks=False`. Same files discovered as before — only the eager crash is gone. 4 new tests (`tests/test_discovery_pruning.py`) |
 
-The full list of bugs found and fixed is in `SKILL.md` (§ "What changed in v3" … "What changed in v4.8").
+| On a monorepo, `import { x } from '@scope/pkg'` (a bare specifier — most cross-package calls) never resolved: the FS-verified import tier only handles relative paths, so these fell into the project-wide INFERRED heuristic, fanned out across every same-named symbol in the repo | Workspace-package tier (**v4.9**, tier 2.5): a bare specifier that matches a sibling workspace package's `name` (from `pnpm-workspace.yaml` / a root `package.json` `workspaces`) resolves to that package's own source tree — `RESOLVED`, `resolved_by: "workspace_import"`, 0.9. Measured on a real 311-package pnpm monorepo: 4,670 cross-package edges moved to `RESOLVED`, ~90k fanned-out INFERRED edges collapsed. No-op outside a workspace. 5 new tests (`tests/test_workspace_resolution.py`) |
+
+The full list of bugs found and fixed is in `SKILL.md` (§ "What changed in v3" … "What changed in v4.9").
 
 ## 🚀 Installation
 

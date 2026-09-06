@@ -4,7 +4,7 @@ description: Turn any codebase into a queryable knowledge graph so structure and
 license: MIT
 ---
 
-# CodeGraph Explorer — Script-First Architecture (v4.8)
+# CodeGraph Explorer — Script-First Architecture (v4.9)
 
 ## Description
 Turn any codebase into a queryable knowledge graph. Inspired by Graphify and Understand Anything.
@@ -546,6 +546,36 @@ gone. `followlinks=False` keeps `os.walk` itself from following directory symlin
 `tests/test_discovery_pruning.py` (4 tests: SKIP_DIR pruning, a 40-level nested
 `node_modules`, a symlink cycle inside `node_modules`, and nested ignore files still
 being found after pruning).
+
+## What changed in v4.9
+
+One precision upgrade to `calls`-edge resolution, for monorepos specifically.
+
+### A workspace-package resolution tier
+
+The filesystem-verified import tier (v4.3) deliberately gives up on a **bare** JS/TS
+specifier — `import { x } from '@scope/pkg'` — because resolving one in general needs
+build-tool metadata the script doesn't parse. But in a monorepo there's one bare-specifier
+case where the metadata *is* unambiguous and *is* right there: when the specifier is the
+`name` of a sibling workspace package. `pnpm-workspace.yaml` (or a root `package.json`
+`workspaces`) lists the member globs; each member's `package.json` `name` maps that
+specifier to exactly one directory.
+
+New **tier 2.5**, between the verified-import tier and the ambiguity-scored INFERRED tier:
+a bare specifier that matches a workspace package name resolves to *that package's own
+source tree*. One name-matched candidate in the package → `RESOLVED`,
+`resolved_by: "workspace_import"`, confidence **0.9** (a notch under tier 2's 0.93 because
+it's directory-scoped, not a single verified file — re-exports through the package
+entrypoint, `export * from './x'`, aren't tracked as edges, so the export can be in any
+file of the package). More than one → the INFERRED candidate set is narrowed to the
+package instead of the whole repo. No-op when the root isn't a workspace.
+
+Measured on a real pnpm monorepo (~46.6k nodes, 311 workspace packages): **4,670**
+cross-package `calls` edges moved from `INFERRED` (~0.2–0.55, and fanned out across every
+same-named symbol in the repo) to a single `RESOLVED` edge each — a quarter of all
+RESOLVED `calls` edges in the graph, and ~90k fanned-out INFERRED edges collapsed away.
+`tests/test_workspace_resolution.py` (5 tests: pnpm + npm `workspaces` config, subpath
+specifiers, the no-workspace no-op, and the narrow-don't-leak case).
 
 ## Auto-Build Protocol (Script-First)
 
