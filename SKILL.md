@@ -4,7 +4,7 @@ description: Turn any codebase into a queryable knowledge graph so structure and
 license: MIT
 ---
 
-# CodeGraph Explorer — Script-First Architecture (v4.6)
+# CodeGraph Explorer — Script-First Architecture (v4.8)
 
 ## Description
 Turn any codebase into a queryable knowledge graph. Inspired by Graphify and Understand Anything.
@@ -524,6 +524,29 @@ building at once. Full setup and knobs: [`references/hook_setup.md`](references/
 `tests/test_session_hook.py` (8 tests: opt-out, non-code dir, missing/stale/fresh graph,
 the lock, the background worker).
 
+## What changed in v4.8
+
+One fix, for a crash that made the builder unusable on a whole class of real repo.
+
+### Discovery prunes during the walk instead of after it
+
+`discover()`, `load_gitignore_tree()`, and `poll_mode()` used `Path.rglob()`, which walks
+the entire subtree eagerly and only then lets the per-path skip filter run. On a monorepo
+that vendors its dependencies — pnpm's deeply nested `node_modules/`, or a package with a
+self-referential directory symlink — `rglob()` raised before `discover()` could skip
+anything: `OSError [WinError 1921]` on Windows, `OSError: [Errno 40] Too many levels of
+symbolic links` elsewhere. The build died with zero files found.
+
+All three now walk with `os.walk()` through a new `_walk_pruned()` helper that drops
+`SKIP_DIRS` entries (`node_modules`, `.git`, `.venv`, `vendor`, `dist`, …) and
+dot-directories from `dirnames` **in place**, so `os.walk` never descends into them and
+the symlink cycle is never reached. The set of files ultimately discovered is identical
+to before — `should_skip()` already filtered exactly these — only the eager crash is
+gone. `followlinks=False` keeps `os.walk` itself from following directory symlinks.
+`tests/test_discovery_pruning.py` (4 tests: SKIP_DIR pruning, a 40-level nested
+`node_modules`, a symlink cycle inside `node_modules`, and nested ignore files still
+being found after pruning).
+
 ## Auto-Build Protocol (Script-First)
 
 ### Rule 1: First Contact → Generate + Run
@@ -996,6 +1019,12 @@ drop is real and intended (you actually deleted most of the project), re-run wit
 1. Check Python version ≥ 3.8 (needed for `ast.end_lineno`).
 2. Check write permissions in the project root (it needs to create `.codegraph/`).
 3. Force a full rebuild: `/graph build --force` (i.e. run without `--update`).
+
+### "OSError [WinError 1921] / Too many levels of symbolic links during discovery"
+Fixed in v4.8. Older versions used `Path.rglob()`, which walked into a vendored
+`node_modules` (pnpm nests them deeply) or a self-referential directory symlink and
+crashed before the skip filter ran. v4.8 prunes `SKIP_DIRS` and dot-directories during
+the walk, so the descent stops at the boundary. Upgrade the script.
 
 ### "Script refuses to build / exits 1 with a message about file count collapsing"
 That's the shrink-guard (v3.4), not a crash: `discover()` found under 10% of the files

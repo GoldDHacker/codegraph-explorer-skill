@@ -80,6 +80,15 @@ Design notes (read this before changing extraction logic):
     a big precision improvement over scanning the whole file, which used to attribute
     every symbol referenced anywhere in a file to every function in that file.
 
+  * v4.8: discovery (discover(), load_gitignore_tree(), poll_mode()) walks the tree with
+    os.walk via _walk_pruned() and drops SKIP_DIRS / dot-directories from `dirnames`
+    *in place*, so descent stops at the directory boundary. Path.rglob() walked the
+    whole subtree eagerly and raised (OSError WinError 1921, or "too many levels of
+    symbolic links") before any per-path skip filter could run -- which made the builder
+    unusable on a monorepo that vendors its dependencies (pnpm's nested node_modules, a
+    self-referential symlink inside a package). The set of paths yielded is unchanged;
+    only the eager crash is gone.
+
   * Nothing here shells out to `go list`, `cargo metadata`, or `javap`. Earlier drafts of
     this skill mentioned those as optional enhancements; they were never implemented, so
     that language has been dropped from the docs rather than left as a false promise.
@@ -120,7 +129,7 @@ from datetime import datetime, timezone
 from fnmatch import fnmatch
 
 # == Configuration ============================================================
-VERSION = "4.7"
+VERSION = "4.8"
 GRAPH_DIR = ".codegraph"
 GRAPH_FILE = "graph.json"
 CACHE_FILE = ".file_cache.json"
@@ -593,6 +602,17 @@ def redact(text):
 # (fixtures, vendored/generated code you don't own, a huge data/ folder that happens
 # to be committed) without having to touch .gitignore itself. Both files are merged
 # in should_skip() -- a path skipped by either one is skipped.
+def _walk_pruned(root: Path):
+    """os.walk from root, pruning SKIP_DIRS and dot-directories in place so a
+    pathological nested node_modules tree (or a symlink cycle inside one) is never
+    descended into. Replaces Path.rglob(), which walks the whole tree eagerly and
+    raises before any per-path skip filter can run."""
+    for dirpath, dirnames, filenames in os.walk(str(root), followlinks=False):
+        dirnames[:] = [d for d in dirnames
+                       if d not in SKIP_DIRS and not d.startswith('.')]
+        yield Path(dirpath), filenames
+
+
 def _parse_ignore_file(p: Path):
     patterns = []
     try:
@@ -621,10 +641,7 @@ def load_gitignore_tree(root: Path, filename: str = '.gitignore'):
         patterns = _parse_ignore_file(root_file)
         if patterns:
             result[''] = patterns
-    try:
-        candidates = root.rglob(filename)
-    except OSError:
-        candidates = []
+    candidates = (d / filename for d, names in _walk_pruned(root) if filename in names)
     for p in candidates:
         if not p.is_file():
             continue
@@ -798,12 +815,14 @@ class GraphBuilder:
 
     def discover(self):
         files = []
-        for p in self.root.rglob('*'):
-            if not p.is_file():
-                continue
-            if self.should_skip(p):
-                continue
-            files.append(p)
+        for dirpath, filenames in _walk_pruned(self.root):
+            for name in filenames:
+                p = dirpath / name
+                if not p.is_file():
+                    continue
+                if self.should_skip(p):
+                    continue
+                files.append(p)
         return files
 
     # -- Python AST extraction (precise) -------------------------------------
@@ -4501,17 +4520,19 @@ def poll_mode(builder: GraphBuilder):
     while True:
         try:
             changed = False
-            for p in builder.root.rglob('*'):
-                if not p.is_file() or builder.should_skip(p):
-                    continue
-                try:
-                    mtime = p.stat().st_mtime
-                except OSError:
-                    continue
-                key = str(p)
-                if key in last_mtimes and last_mtimes[key] != mtime:
-                    changed = True
-                last_mtimes[key] = mtime
+            for dirpath, filenames in _walk_pruned(builder.root):
+                for name in filenames:
+                    p = dirpath / name
+                    if not p.is_file() or builder.should_skip(p):
+                        continue
+                    try:
+                        mtime = p.stat().st_mtime
+                    except OSError:
+                        continue
+                    key = str(p)
+                    if key in last_mtimes and last_mtimes[key] != mtime:
+                        changed = True
+                    last_mtimes[key] = mtime
             if changed:
                 log("[watch] changes detected, updating...")
                 builder.build(incremental=True)
